@@ -54,6 +54,67 @@ describe("blooioChannel inbound route", () => {
     expect(options.state.chatId).toBe("+15551234567");
   });
 
+  it("forwards inbound attachments as multimodal file parts", async () => {
+    const channel = blooioChannel({ credentials: { apiKey: "sk", webhookSecret: SECRET } });
+    const handler = getPostHandler(channel);
+
+    const send = vi.fn(async () => ({ id: "session_1" }));
+    const tasks: Promise<unknown>[] = [];
+    const res = await handler(
+      signedWebhook({
+        event: "message.received",
+        message_id: "msg_2",
+        sender: "+15551234567",
+        internal_id: "+15557654321",
+        text: "look at this",
+        attachments: [
+          {
+            url: "https://bucket.blooio.com/api-attachments/abc.png",
+            mime_type: "image/png",
+            file_name: "abc.png",
+          },
+        ],
+      }),
+      { send, waitUntil: (task: Promise<unknown>) => tasks.push(task) },
+    );
+    await Promise.all(tasks);
+
+    expect(res.status).toBe(200);
+    const [payload] = send.mock.calls[0] as unknown as [any, any];
+    expect(Array.isArray(payload.message)).toBe(true);
+    expect(payload.message[0]).toEqual({ type: "text", text: "look at this" });
+    expect(payload.message[1].type).toBe("file");
+    expect(payload.message[1].mediaType).toBe("image/png");
+    expect(payload.message[1].filename).toBe("abc.png");
+    expect(String(payload.message[1].data)).toBe(
+      "https://bucket.blooio.com/api-attachments/abc.png",
+    );
+  });
+
+  it("infers the media type from the URL when none is provided", async () => {
+    const channel = blooioChannel({ credentials: { apiKey: "sk", webhookSecret: SECRET } });
+    const handler = getPostHandler(channel);
+
+    const send = vi.fn(async () => ({ id: "session_1" }));
+    const tasks: Promise<unknown>[] = [];
+    await handler(
+      signedWebhook({
+        event: "message.received",
+        sender: "+15551234567",
+        text: "",
+        attachments: [{ url: "https://bucket.blooio.com/api-attachments/clip.mov" }],
+      }),
+      { send, waitUntil: (task: Promise<unknown>) => tasks.push(task) },
+    );
+    await Promise.all(tasks);
+
+    const [payload] = send.mock.calls[0] as unknown as [any, any];
+    expect(Array.isArray(payload.message)).toBe(true);
+    expect(payload.message).toHaveLength(1);
+    expect(payload.message[0].type).toBe("file");
+    expect(payload.message[0].mediaType).toBe("video/quicktime");
+  });
+
   it("rejects an unsigned webhook", async () => {
     const channel = blooioChannel({ credentials: { apiKey: "sk", webhookSecret: SECRET } });
     const handler = getPostHandler(channel);

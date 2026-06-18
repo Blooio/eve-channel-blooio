@@ -62,6 +62,7 @@ Blooio signs every delivery with `X-Blooio-Signature: t=<unix>,v1=<hmac_sha256>`
 ## How it works
 
 - **Inbound** — A verified `message.received` webhook is parsed and dispatched into the agent. Conversations are sticky to the receiving Blooio line via a continuation token (`blooio:<internalId>:<chatId>`). Group chats route to the group ID; 1:1 chats route to the sender. Delivery-status events (`message.sent`, `message.delivered`, `message.read`, `message.failed`) are acknowledged and ignored.
+- **Inbound attachments** — Images, video, audio, and documents on an inbound message are forwarded to the model as multimodal `UserContent` file parts (one per attachment, alongside any text). Blooio serves inbound media from a public bucket, so the file URLs pass straight through to your model provider — no extra download step or `fetchFile` hook required.
 - **Outbound** — When the agent produces a reply, the default `message.completed` handler sends it back through `POST /chats/{chatId}/messages`. Errors are reported to the conversation.
 
 ## Capabilities

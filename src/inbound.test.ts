@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { formatBlooioContextBlock, parseBlooioInboundMessage } from "./inbound.js";
+import {
+  formatBlooioContextBlock,
+  parseBlooioInboundMessage,
+  resolveAttachmentMediaType,
+} from "./inbound.js";
 
 describe("parseBlooioInboundMessage", () => {
   it("parses a 1:1 inbound message", () => {
@@ -50,11 +54,17 @@ describe("parseBlooioInboundMessage", () => {
     const message = parseBlooioInboundMessage({
       event: "message.received",
       sender: "+15551234567",
-      attachments: ["https://cdn/x.jpg", { url: "https://cdn/y.png", name: "y" }],
+      attachments: [
+        "https://cdn/x.jpg",
+        { url: "https://cdn/y.png", file_name: "y.png", mime_type: "image/png", size: 42 },
+      ],
       reply_to: { message_id: "msg_parent", part_index: 0 },
     });
     expect(message?.attachments).toHaveLength(2);
     expect(message?.attachments[0]?.url).toBe("https://cdn/x.jpg");
+    expect(message?.attachments[1]?.name).toBe("y.png");
+    expect(message?.attachments[1]?.mimeType).toBe("image/png");
+    expect(message?.attachments[1]?.size).toBe(42);
     expect(message?.replyTo?.messageId).toBe("msg_parent");
   });
 
@@ -67,6 +77,25 @@ describe("parseBlooioInboundMessage", () => {
 
   it("drops received events with no addressable target", () => {
     expect(parseBlooioInboundMessage({ event: "message.received", text: "x" })).toBeNull();
+  });
+});
+
+describe("resolveAttachmentMediaType", () => {
+  it("prefers the explicit mime type", () => {
+    expect(resolveAttachmentMediaType({ url: "https://x/y.bin", mimeType: "image/png" })).toBe(
+      "image/png",
+    );
+  });
+
+  it("infers from the URL extension", () => {
+    expect(resolveAttachmentMediaType({ url: "https://x/y.jpg" })).toBe("image/jpeg");
+    expect(resolveAttachmentMediaType({ url: "https://x/y.mov?token=1" })).toBe("video/quicktime");
+    expect(resolveAttachmentMediaType({ url: "https://x/y.pdf" })).toBe("application/pdf");
+  });
+
+  it("falls back to octet-stream", () => {
+    expect(resolveAttachmentMediaType({ url: "https://x/y" })).toBe("application/octet-stream");
+    expect(resolveAttachmentMediaType({})).toBe("application/octet-stream");
   });
 });
 
