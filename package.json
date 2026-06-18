@@ -1,0 +1,68 @@
+{
+  "name": "eve-channel-blooio",
+  "version": "0.1.0",
+  "description": "Blooio channel for Vercel eve. Send and receive iMessage, RCS, and SMS through the Blooio v2 API, with tapback reactions, typing indicators, read receipts, and capability checks.",
+  "license": "MIT",
+  "type": "module",
+  "author": {
+    "name": "David Harvey",
+    "email": "david@blooio.com"
+  },
+  "homepage": "https://blooio.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Blooio/eve-channel-blooio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Blooio/eve-channel-blooio/issues"
+  },
+  "keywords": [
+    "eve",
+    "vercel-eve",
+    "eve-channel",
+    "blooio",
+    "imessage",
+    "rcs",
+    "sms",
+    "agent",
+    "ai-agent"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run clean && npm run build",
+    "release": "release-it"
+  },
+  "peerDependencies": {
+    "eve": ">=0.11.0"
+  },
+  "devDependencies": {
+    "eve": "latest",
+    "@types/node": "^22.0.0",
+    "release-it": "^20.2.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
