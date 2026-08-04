@@ -1,50 +1,52 @@
 /**
- * Blooio inbound webhook parsing and prompt shaping.
+ * Blooio v4 inbound webhook parsing and prompt shaping.
  *
- * The channel owns these small data shapes instead of exposing raw
- * Blooio webhook payloads as the public API surface. See the Blooio
- * `message.received` event schema.
+ * Native v4 webhooks use the envelope `{ id, type, created_at,
+ * organization_id, data }`. The channel owns these small data shapes instead
+ * of exposing raw Blooio payloads as its public API surface. See the Blooio
+ * `message.received` event.
  */
 
-/** One inbound attachment as delivered by a Blooio webhook. */
+/** One inbound attachment as delivered by a Blooio v4 webhook. */
 export interface BlooioInboundAttachment {
-  /** Public URL of the file (Blooio serves inbound media from a public bucket). */
+  /** Servable, decrypted URL (Blooio re-hosts inbound media before delivery). */
   readonly url?: string;
-  /** Display file name (`file_name` in the webhook payload). */
-  readonly name?: string;
-  /** MIME type (`mime_type` in the webhook payload). */
-  readonly mimeType?: string;
+  /** Content type (`media_type` in the webhook payload). */
+  readonly mediaType?: string;
   readonly size?: number;
+  readonly caption?: string;
   readonly [key: string]: unknown;
 }
 
-/** Threaded-reply parent reference, present only on inline-reply inbounds. */
-export interface BlooioReplyTo {
-  readonly messageId?: string;
-  readonly guid?: string;
-  readonly partIndex?: number;
-}
-
-/** Channel-owned representation of one inbound Blooio message. */
+/** Channel-owned representation of one inbound Blooio v4 message. */
 export interface BlooioInboundMessage {
-  /** Blooio message ID (`msg_...`). */
+  /** Event id (`evt_...`). */
+  readonly eventId: string | undefined;
+  /** Blooio message id (`msg_...`). */
   readonly messageId: string | undefined;
-  /** Who sent the message: phone (E.164) or email. */
-  readonly sender: string;
-  /** The Blooio device/number that received the message (our line). */
-  readonly internalId: string | undefined;
-  /** Reply target: the group ID for group chats, otherwise the sender. */
+  /** Chat id (`chat_...`). The reply target and continuation-token key. */
   readonly chatId: string;
+  /** Channel id (`ch_...`) that received the message. */
+  readonly channelId: string | undefined;
+  /** Channel type, e.g. `blooio`. */
+  readonly channelType: string | undefined;
+  /** Sender identifier (phone / email / opaque id). */
+  readonly sender: string | undefined;
+  /** The Blooio channel address that received the message (our line). */
+  readonly recipient: string | undefined;
   readonly text: string;
   readonly attachments: readonly BlooioInboundAttachment[];
+  /** Resolved wire transport: `imessage`, `sms`, `rcs`, `whatsapp`, `pending`, `unknown`. */
   readonly protocol: string | undefined;
+  /** Content type, e.g. `text`, `media`, `interactive`, `poll`. */
+  readonly messageType: string | undefined;
   readonly isGroup: boolean;
   readonly groupId: string | undefined;
   readonly groupName: string | undefined;
-  readonly participants: readonly string[] | undefined;
-  readonly replyTo: BlooioReplyTo | undefined;
+  /** Structured interactive reply content, when present. */
+  readonly interactive: Record<string, unknown> | undefined;
   readonly receivedAt: number | undefined;
-  /** The raw parsed webhook payload. */
+  /** The raw parsed webhook envelope. */
   readonly raw: Record<string, unknown>;
 }
 
@@ -54,37 +56,42 @@ const BLOOIO_RESPONSE_INSTRUCTIONS =
   "question when more information is needed.";
 
 /**
- * Parses a Blooio webhook payload into a {@link BlooioInboundMessage}.
+ * Parses a Blooio v4 webhook envelope into a {@link BlooioInboundMessage}.
  *
- * Returns `null` for payloads that are not inbound `message.received`
- * events, or that lack a sender. Delivery-status events
+ * Returns `null` for envelopes that are not inbound `message.received`
+ * events, or that lack a chat id. Delivery-status events
  * (`message.sent`, `message.delivered`, etc.) are intentionally ignored.
  */
 export function parseBlooioInboundMessage(payload: unknown): BlooioInboundMessage | null {
   if (!isRecord(payload)) return null;
-  if (payload.event !== "message.received") return null;
+  if (payload.type !== "message.received") return null;
 
-  const isGroup = payload.is_group === true;
-  const sender = readString(payload.sender) ?? readString(payload.external_id);
-  const groupId = readString(payload.group_id);
-  const chatId = isGroup ? groupId : sender;
+  const data = isRecord(payload.data) ? payload.data : {};
+  const chatId = readString(data.chat_id);
   if (!chatId) return null;
 
+  const group = isRecord(data.group) ? data.group : undefined;
+  const groupId = readString(data.group_id) ?? readString(group?.group_id);
+  const isGroup = data.is_group === true || groupId !== undefined;
+
   return {
-    attachments: readAttachments(payload.attachments),
+    attachments: readAttachments(data.attachments),
+    channelId: readString(data.channel_id),
+    channelType: readString(data.channel_type),
     chatId,
+    eventId: readString(payload.id),
     groupId,
-    groupName: readString(payload.group_name),
-    internalId: readString(payload.internal_id),
+    groupName: readString(group?.name) ?? readString(data.group_name),
+    interactive: isRecord(data.interactive) ? data.interactive : undefined,
     isGroup,
-    messageId: readString(payload.message_id),
-    participants: readStringArray(payload.participants),
-    protocol: readString(payload.protocol),
+    messageId: readString(data.message_id),
+    messageType: readString(data.message_type) ?? readString(data.type),
+    protocol: readString(data.protocol),
     raw: payload,
-    receivedAt: readNumber(payload.received_at) ?? readNumber(payload.timestamp),
-    replyTo: readReplyTo(payload.reply_to),
-    sender: sender ?? chatId,
-    text: readString(payload.text) ?? "",
+    receivedAt: readNumber(payload.created_at) ?? readNumber(data.occurred_at),
+    recipient: readString(data.recipient) ?? readString(data.channel_address),
+    sender: readString(data.sender) ?? readString(readRecordString(data.contact, "identifier")),
+    text: readString(data.text) ?? "",
   };
 }
 
@@ -95,28 +102,18 @@ export function formatBlooioContextBlock(message: BlooioInboundMessage): string 
     `channel: ${message.isGroup ? "group" : "direct"}`,
     "response_medium: imessage",
     `response_instructions: ${BLOOIO_RESPONSE_INSTRUCTIONS}`,
-    `from: ${message.sender}`,
-    ...(message.internalId ? [`to: ${message.internalId}`] : []),
+    ...(message.sender ? [`from: ${message.sender}`] : []),
+    ...(message.recipient ? [`to: ${message.recipient}`] : []),
+    ...(message.channelType ? [`channel_type: ${message.channelType}`] : []),
     ...(message.protocol ? [`protocol: ${message.protocol}`] : []),
     ...(message.messageId ? [`message_id: ${message.messageId}`] : []),
+    `chat_id: ${message.chatId}`,
     ...(message.isGroup && message.groupId ? [`group_id: ${message.groupId}`] : []),
     ...(message.isGroup && message.groupName ? [`group_name: ${message.groupName}`] : []),
-    ...(message.attachments.length > 0
-      ? [`attachments: ${message.attachments.length}`]
-      : []),
-    ...(message.replyTo?.messageId ? [`reply_to: ${message.replyTo.messageId}`] : []),
+    ...(message.attachments.length > 0 ? [`attachments: ${message.attachments.length}`] : []),
     "</blooio_context>",
   ];
   return lines.join("\n");
-}
-
-function readReplyTo(value: unknown): BlooioReplyTo | undefined {
-  if (!isRecord(value)) return undefined;
-  const messageId = readString(value.message_id);
-  const guid = readString(value.guid);
-  const partIndex = readNumber(value.part_index);
-  if (messageId === undefined && guid === undefined && partIndex === undefined) return undefined;
-  return { guid, messageId, partIndex };
 }
 
 function readAttachments(value: unknown): BlooioInboundAttachment[] {
@@ -127,9 +124,9 @@ function readAttachments(value: unknown): BlooioInboundAttachment[] {
     return {
       ...entry,
       url: readString(entry.url),
-      name: readString(entry.file_name) ?? readString(entry.name),
-      mimeType: readString(entry.mime_type) ?? readString(entry.mimeType),
+      mediaType: readString(entry.media_type) ?? readString(entry.mediaType),
       size: readNumber(entry.size),
+      caption: readString(entry.caption),
     };
   });
 }
@@ -164,12 +161,12 @@ const EXTENSION_MEDIA_TYPES: Record<string, string> = {
 };
 
 /**
- * Best-effort MIME type for an attachment: prefers the explicit
- * `mimeType`, then infers from the URL extension, then falls back to
+ * Best-effort MIME type for an attachment: prefers the explicit `mediaType`,
+ * then infers from the URL extension, then falls back to
  * `application/octet-stream`.
  */
 export function resolveAttachmentMediaType(attachment: BlooioInboundAttachment): string {
-  if (attachment.mimeType) return attachment.mimeType;
+  if (attachment.mediaType) return attachment.mediaType;
   const url = attachment.url;
   if (url) {
     const path = url.split(/[?#]/, 1)[0] ?? url;
@@ -183,16 +180,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function readRecordString(value: unknown, key: string): unknown {
+  return isRecord(value) ? value[key] : undefined;
+}
+
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function readStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const items = value.filter((entry): entry is string => typeof entry === "string");
-  return items.length > 0 ? items : undefined;
 }

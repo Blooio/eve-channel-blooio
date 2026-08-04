@@ -6,83 +6,102 @@ import {
   resolveAttachmentMediaType,
 } from "./inbound.js";
 
+/** A minimal native v4 `message.received` webhook envelope. */
+function envelope(data: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+  return {
+    id: "evt_1",
+    type: "message.received",
+    created_at: 1000,
+    organization_id: "org_1",
+    data,
+    ...extra,
+  };
+}
+
 describe("parseBlooioInboundMessage", () => {
-  it("parses a 1:1 inbound message", () => {
-    const message = parseBlooioInboundMessage({
-      event: "message.received",
-      message_id: "msg_123",
-      sender: "+15551234567",
-      internal_id: "+15557654321",
-      protocol: "imessage",
-      text: "hello",
-      timestamp: 1000,
-    });
+  it("parses a 1:1 inbound message from the v4 envelope", () => {
+    const message = parseBlooioInboundMessage(
+      envelope({
+        message_id: "msg_123",
+        chat_id: "chat_abc",
+        channel_id: "ch_1",
+        channel_type: "blooio",
+        direction: "inbound",
+        kind: "received",
+        protocol: "imessage",
+        text: "hello",
+        sender: "+15551234567",
+        recipient: "+15557654321",
+        contact: { identifier: "+15551234567" },
+      }),
+    );
     expect(message).not.toBeNull();
-    expect(message?.chatId).toBe("+15551234567");
+    expect(message?.chatId).toBe("chat_abc");
     expect(message?.sender).toBe("+15551234567");
-    expect(message?.internalId).toBe("+15557654321");
+    expect(message?.recipient).toBe("+15557654321");
+    expect(message?.channelType).toBe("blooio");
     expect(message?.isGroup).toBe(false);
     expect(message?.text).toBe("hello");
     expect(message?.messageId).toBe("msg_123");
+    expect(message?.eventId).toBe("evt_1");
+    expect(message?.receivedAt).toBe(1000);
   });
 
-  it("routes group messages to the group id", () => {
-    const message = parseBlooioInboundMessage({
-      event: "message.received",
-      is_group: true,
-      group_id: "grp_abc",
-      group_name: "Team",
-      sender: "+15551234567",
-      text: "hi all",
-    });
+  it("marks group messages via group data", () => {
+    const message = parseBlooioInboundMessage(
+      envelope({
+        chat_id: "chat_grp",
+        sender: "+15551234567",
+        text: "hi all",
+        group: { group_id: "grp_abc", name: "Team" },
+      }),
+    );
     expect(message?.isGroup).toBe(true);
-    expect(message?.chatId).toBe("grp_abc");
+    expect(message?.chatId).toBe("chat_grp");
+    expect(message?.groupId).toBe("grp_abc");
     expect(message?.groupName).toBe("Team");
   });
 
-  it("falls back to external_id when sender is absent", () => {
-    const message = parseBlooioInboundMessage({
-      event: "message.received",
-      external_id: "+15550001111",
-      text: "yo",
-    });
+  it("falls back to the contact identifier when sender is absent", () => {
+    const message = parseBlooioInboundMessage(
+      envelope({ chat_id: "chat_x", contact: { identifier: "+15550001111" }, text: "yo" }),
+    );
     expect(message?.sender).toBe("+15550001111");
-    expect(message?.chatId).toBe("+15550001111");
   });
 
-  it("normalizes attachments and reply metadata", () => {
-    const message = parseBlooioInboundMessage({
-      event: "message.received",
-      sender: "+15551234567",
-      attachments: [
-        "https://cdn/x.jpg",
-        { url: "https://cdn/y.png", file_name: "y.png", mime_type: "image/png", size: 42 },
-      ],
-      reply_to: { message_id: "msg_parent", part_index: 0 },
-    });
+  it("normalizes v4 attachments (url/media_type/size/caption)", () => {
+    const message = parseBlooioInboundMessage(
+      envelope({
+        chat_id: "chat_x",
+        sender: "+15551234567",
+        attachments: [
+          "https://bucket/x.jpg",
+          { url: "https://bucket/y.png", media_type: "image/png", size: 42, caption: "hey" },
+        ],
+      }),
+    );
     expect(message?.attachments).toHaveLength(2);
-    expect(message?.attachments[0]?.url).toBe("https://cdn/x.jpg");
-    expect(message?.attachments[1]?.name).toBe("y.png");
-    expect(message?.attachments[1]?.mimeType).toBe("image/png");
+    expect(message?.attachments[0]?.url).toBe("https://bucket/x.jpg");
+    expect(message?.attachments[1]?.mediaType).toBe("image/png");
     expect(message?.attachments[1]?.size).toBe(42);
-    expect(message?.replyTo?.messageId).toBe("msg_parent");
+    expect(message?.attachments[1]?.caption).toBe("hey");
   });
 
   it("ignores non-received events", () => {
-    expect(parseBlooioInboundMessage({ event: "message.delivered" })).toBeNull();
-    expect(parseBlooioInboundMessage({ event: "message.sent" })).toBeNull();
+    expect(parseBlooioInboundMessage(envelope({ chat_id: "c" }, { type: "message.delivered" }))).toBeNull();
+    expect(parseBlooioInboundMessage(envelope({ chat_id: "c" }, { type: "typing.started" }))).toBeNull();
     expect(parseBlooioInboundMessage(null)).toBeNull();
     expect(parseBlooioInboundMessage("nope")).toBeNull();
   });
 
-  it("drops received events with no addressable target", () => {
-    expect(parseBlooioInboundMessage({ event: "message.received", text: "x" })).toBeNull();
+  it("drops received events with no chat id", () => {
+    expect(parseBlooioInboundMessage(envelope({ text: "x", sender: "+1" }))).toBeNull();
   });
 });
 
 describe("resolveAttachmentMediaType", () => {
-  it("prefers the explicit mime type", () => {
-    expect(resolveAttachmentMediaType({ url: "https://x/y.bin", mimeType: "image/png" })).toBe(
+  it("prefers the explicit media type", () => {
+    expect(resolveAttachmentMediaType({ url: "https://x/y.bin", mediaType: "image/png" })).toBe(
       "image/png",
     );
   });
@@ -101,17 +120,21 @@ describe("resolveAttachmentMediaType", () => {
 
 describe("formatBlooioContextBlock", () => {
   it("renders a deterministic context block", () => {
-    const message = parseBlooioInboundMessage({
-      event: "message.received",
-      message_id: "msg_1",
-      sender: "+15551234567",
-      internal_id: "+15557654321",
-      protocol: "imessage",
-      text: "hello",
-    });
+    const message = parseBlooioInboundMessage(
+      envelope({
+        message_id: "msg_1",
+        chat_id: "chat_abc",
+        channel_type: "blooio",
+        protocol: "imessage",
+        sender: "+15551234567",
+        recipient: "+15557654321",
+        text: "hello",
+      }),
+    );
     const block = formatBlooioContextBlock(message!);
     expect(block).toContain("<blooio_context>");
     expect(block).toContain("from: +15551234567");
+    expect(block).toContain("chat_id: chat_abc");
     expect(block).toContain("message_id: msg_1");
     expect(block).toContain("</blooio_context>");
   });

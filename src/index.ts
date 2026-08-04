@@ -19,34 +19,39 @@ export {
 export {
   blooioContinuationToken,
   callBlooioApi,
-  checkBlooioCapabilities,
   DEFAULT_BLOOIO_BASE_URL,
+  getBlooioContactCapabilities,
   listBlooioMessages,
+  lookupBlooioNumber,
   markBlooioChatRead,
   reactBlooioMessage,
   resolveBlooioApiKey,
   resolveBlooioBaseUrl,
   sendBlooioMessage,
+  sendBlooioPoll,
+  sendBlooioToRecipient,
+  shareBlooioContactCard,
   startBlooioTyping,
   stopBlooioTyping,
   type BlooioApiKey,
   type BlooioApiOptions,
   type BlooioApiResponse,
-  type BlooioAttachment,
+  type BlooioChannelType,
   type BlooioCredentials,
   type BlooioFetch,
   type BlooioListMessagesInput,
-  type BlooioMessageEffect,
   type BlooioReactInput,
   type BlooioSendMessageInput,
+  type BlooioSendPollInput,
+  type BlooioSendToRecipientInput,
 } from "./api.js";
 
 export {
   formatBlooioContextBlock,
   parseBlooioInboundMessage,
+  resolveAttachmentMediaType,
   type BlooioInboundAttachment,
   type BlooioInboundMessage,
-  type BlooioReplyTo,
 } from "./inbound.js";
 
 export {

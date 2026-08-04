@@ -11,17 +11,20 @@ import type {
 export function defaultBlooioAuth(message: BlooioInboundMessage): SessionAuthContext {
   const attributes: Record<string, string> = {
     channel: message.isGroup ? "group" : "direct",
-    from: message.sender,
   };
-  if (message.internalId) attributes.to = message.internalId;
+  if (message.sender) attributes.from = message.sender;
+  if (message.recipient) attributes.to = message.recipient;
+  if (message.channelType) attributes.channel_type = message.channelType;
   if (message.isGroup && message.groupId) attributes.group_id = message.groupId;
   if (message.protocol) attributes.protocol = message.protocol;
+
+  const principal = message.isGroup && message.groupId ? message.groupId : (message.sender ?? message.chatId);
 
   return {
     attributes,
     authenticator: "blooio-webhook",
     issuer: "blooio",
-    principalId: `blooio:${message.isGroup && message.groupId ? message.groupId : message.sender}`,
+    principalId: `blooio:${principal}`,
     principalType: "user",
   };
 }

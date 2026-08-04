@@ -1,7 +1,7 @@
 {
   "name": "eve-channel-blooio",
-  "version": "0.1.0",
-  "description": "Blooio channel for Vercel eve. Send and receive iMessage, RCS, and SMS through the Blooio v2 API, with tapback reactions, typing indicators, read receipts, and capability checks.",
+  "version": "0.2.0",
+  "description": "Blooio channel for Vercel eve. Send and receive iMessage, RCS, and SMS through the Blooio v4 API, with tapback reactions, typing indicators, read receipts, polls, groups, capability checks, and history.",
   "license": "MIT",
   "type": "module",
   "author": {

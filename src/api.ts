@@ -1,13 +1,14 @@
 /**
- * Minimal Blooio v2 REST API client used by the Blooio channel.
+ * Minimal Blooio v4 REST API client used by the Blooio channel.
  *
- * Requests use JSON bodies and Bearer authentication. No Blooio SDK
- * dependency is required or exposed through the channel's public API.
- * See https://backend.blooio.com/v2/api.
+ * Requests use JSON bodies and Bearer authentication
+ * (`Authorization: Bearer bl_live_...`). No Blooio SDK dependency is
+ * required or exposed through the channel's public API.
+ * See https://api.blooio.com/v4/openapi.json.
  */
 
-/** Default base URL for the Blooio v2 API. */
-export const DEFAULT_BLOOIO_BASE_URL = "https://backend.blooio.com/v2/api";
+/** Default base URL for the Blooio v4 API. */
+export const DEFAULT_BLOOIO_BASE_URL = "https://api.blooio.com/v4";
 
 /** API key, materialized directly or from an async secret provider. */
 export type BlooioApiKey = string | (() => string | Promise<string>);
@@ -15,9 +16,17 @@ export type BlooioApiKey = string | (() => string | Promise<string>);
 /** Fetch implementation override matching the global `fetch` signature. Defaults to the runtime global; supply a custom one for tests or non-standard runtimes. */
 export type BlooioFetch = typeof fetch;
 
+/** Blooio v4 channel type. `blooio` is the iMessage / RCS / SMS channel. */
+export type BlooioChannelType =
+  | "blooio"
+  | "twilio"
+  | "whatsapp"
+  | "whatsapp_business"
+  | "rcs_business";
+
 /** Credentials required for Blooio REST API calls and webhook verification. */
 export interface BlooioCredentials {
-  /** Blooio API key (Bearer token). Falls back to `BLOOIO_API_KEY`. */
+  /** Blooio API key (`bl_live_...`, sent as a Bearer token). Falls back to `BLOOIO_API_KEY`. */
   readonly apiKey?: BlooioApiKey;
   /** Webhook signing secret (`whsec_...`). Falls back to `BLOOIO_WEBHOOK_SECRET`. */
   readonly webhookSecret?: string | (() => string | Promise<string>);
@@ -42,75 +51,63 @@ export interface BlooioApiResponse {
   readonly body: unknown;
 }
 
-/** iMessage send-with-effect identifiers. iMessage-only; ignored on SMS/RCS. */
-export type BlooioMessageEffect =
-  | "balloons"
-  | "celebration"
-  | "confetti"
-  | "echo"
-  | "fireworks"
-  | "gentle"
-  | "invisible-ink"
-  | "lasers"
-  | "loud"
-  | "love"
-  | "slam"
-  | "spotlight";
-
-/** One outbound attachment: a public URL with an optional display name. */
-export interface BlooioAttachment {
-  readonly url: string;
-  readonly name?: string;
-}
-
-/** Parameters for sending an outbound Blooio message. */
+/** Parameters for sending a message to an existing chat (`POST /chats/{chatId}/messages`). */
 export interface BlooioSendMessageInput extends BlooioApiOptions {
-  /** Conversation target: phone (E.164), email, group ID (`grp_...`), or comma-separated recipients. */
+  /** Chat id (`chat_...`). */
   readonly chatId: string;
   readonly text?: string;
-  readonly attachments?: readonly (string | BlooioAttachment)[];
-  /** E.164 number to send from. Must be assigned to your API key. Optional for Twilio keys. */
-  readonly fromNumber?: string;
-  readonly effect?: BlooioMessageEffect;
-  /** Send as an inline reply to an earlier Blooio message (`msg_...`). iMessage-only. */
-  readonly replyToMessageId?: string;
-  readonly shareContact?: boolean;
-  readonly useTypingIndicator?: boolean;
+  /** Public https media URLs. May be combined with `text` (sent as media with a caption). */
+  readonly attachments?: readonly string[];
   /** Unique key to prevent duplicate sends. Re-using a key returns the original result. */
   readonly idempotencyKey?: string;
 }
 
-/** Parameters for adding or removing a reaction on a message. */
+/** Parameters for a routed send to a recipient (`POST /messages`). Used for proactive conversations. */
+export interface BlooioSendToRecipientInput extends BlooioApiOptions {
+  /** Recipient: phone (any common format), email, or opaque provider id. */
+  readonly to: string;
+  readonly text?: string;
+  readonly attachments?: readonly string[];
+  /** Exact sender (phone, channel alias, or `ch_...`). Mutually exclusive with `channelType`. */
+  readonly from?: string;
+  /** Constrain automatic routing to one channel type. Defaults to `blooio` when `from` is omitted. */
+  readonly channelType?: BlooioChannelType;
+  readonly idempotencyKey?: string;
+}
+
+/** Parameters for adding or removing a reaction on a message (`POST /chats/{chatId}/messages/{messageId}/reactions`). */
 export interface BlooioReactInput extends BlooioApiOptions {
   readonly chatId: string;
-  /** Message ID (`msg_...`) or a relative index (`-1` for the last message). */
+  /** Message id (`msg_...`). */
   readonly messageId: string;
   /** Prefix with `+` to add or `-` to remove. Tapbacks: love, like, dislike, laugh, emphasize, question. Emoji also accepted. */
   readonly reaction: string;
-  /** Only used when `messageId` is a relative index: filters which direction the index counts. */
-  readonly direction?: "inbound" | "outbound";
 }
 
-/** Filters for listing messages in a conversation. */
+/** Parameters for listing messages in a chat (`GET /chats/{chatId}/messages`). Cursor-paginated. */
 export interface BlooioListMessagesInput extends BlooioApiOptions {
   readonly chatId: string;
   readonly limit?: number;
-  readonly offset?: number;
-  readonly direction?: "inbound" | "outbound";
-  readonly since?: number;
-  readonly until?: number;
-  readonly sort?: "asc" | "desc";
+  /** Opaque pagination cursor from a prior response's `next_cursor`. */
+  readonly cursor?: string;
+  readonly order?: "asc" | "desc";
+}
+
+/** Parameters for sending a native poll (`POST /chats/{chatId}/polls`). */
+export interface BlooioSendPollInput extends BlooioApiOptions {
+  readonly chatId: string;
+  readonly title: string;
+  readonly options: readonly string[];
 }
 
 /**
- * Builds the Blooio channel-local continuation token (`<internalId>:<chatId>`).
- * Route `send()` namespaces this with the channel name before passing it to
- * the runtime (`blooio:<internalId>:<chatId>`), keeping a conversation sticky
- * to a specific phone line. `internalId` may be empty when the sending number
- * is not yet known.
+ * Builds the Blooio channel-local continuation token from a chat id
+ * (`chat_...`). The route `send()` namespaces this with the channel name
+ * before handing it to the runtime (`blooio:<chatId>`), keeping a
+ * conversation sticky to its Blooio chat.
  */
-export function blooioContinuationToken(internalId: string | undefined, chatId: string): string {
-  return `${internalId ?? ""}:${chatId}`;
+export function blooioContinuationToken(chatId: string): string {
+  return chatId;
 }
 
 /** Resolves a Blooio API key, falling back to `BLOOIO_API_KEY`. */
@@ -127,7 +124,7 @@ export function resolveBlooioBaseUrl(baseUrl?: string): string {
 }
 
 /**
- * Calls the Blooio v2 REST API with Bearer auth and an optional JSON body.
+ * Calls the Blooio v4 REST API with Bearer auth and an optional JSON body.
  *
  * `path` is relative to the resolved base URL and must begin with `/`.
  */
@@ -173,34 +170,57 @@ export async function callBlooioApi(
   };
 }
 
-/** Sends a text and/or attachment message to a chat (`POST /chats/{chatId}/messages`). */
+/** Builds the message content body shared by chat and routed sends. */
+function messageContentBody(text?: string, attachments?: readonly string[]): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (text) body.text = text;
+  if (attachments && attachments.length > 0) body.attachments = [...attachments];
+  return body;
+}
+
+/** Sends a text and/or attachment message to an existing chat (`POST /chats/{chatId}/messages`). */
 export async function sendBlooioMessage(input: BlooioSendMessageInput): Promise<BlooioApiResponse> {
   if (!input.text && (!input.attachments || input.attachments.length === 0)) {
     throw new Error("blooioChannel: sending a message requires text or at least one attachment.");
   }
-  const body: Record<string, unknown> = {};
-  if (input.text) body.text = input.text;
-  if (input.attachments && input.attachments.length > 0) {
-    body.attachments = input.attachments.map((attachment) =>
-      typeof attachment === "string"
-        ? attachment
-        : attachment.name
-          ? { url: attachment.url, name: attachment.name }
-          : attachment.url,
-    );
-  }
-  if (input.fromNumber) body.from_number = input.fromNumber;
-  if (input.effect) body.effect = input.effect;
-  if (input.replyToMessageId) body.reply_to = { message_id: input.replyToMessageId };
-  if (input.shareContact !== undefined) body.share_contact = input.shareContact;
-  if (input.useTypingIndicator !== undefined) body.use_typing_indicator = input.useTypingIndicator;
-
   return callBlooioApi({
     baseUrl: input.baseUrl,
     credentials: input.credentials,
     fetch: input.fetch,
     method: "POST",
     path: `/chats/${encodeURIComponent(input.chatId)}/messages`,
+    body: messageContentBody(input.text, input.attachments),
+    headers: input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey } : undefined,
+  });
+}
+
+/**
+ * Sends a routed message to a recipient (`POST /messages`), used to start a
+ * proactive conversation. Defaults routing to the Blooio channel type unless an
+ * explicit `from` is supplied (the two are mutually exclusive in the v4 API).
+ */
+export async function sendBlooioToRecipient(
+  input: BlooioSendToRecipientInput,
+): Promise<BlooioApiResponse> {
+  if (!input.text && (!input.attachments || input.attachments.length === 0)) {
+    throw new Error("blooioChannel: sending a message requires text or at least one attachment.");
+  }
+  const body: Record<string, unknown> = {
+    ...messageContentBody(input.text, input.attachments),
+    to: input.to,
+  };
+  if (input.from) {
+    body.from = input.from;
+  } else {
+    body.channel_type = input.channelType ?? "blooio";
+  }
+
+  return callBlooioApi({
+    baseUrl: input.baseUrl,
+    credentials: input.credentials,
+    fetch: input.fetch,
+    method: "POST",
+    path: "/messages",
     body,
     headers: input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey } : undefined,
   });
@@ -208,8 +228,6 @@ export async function sendBlooioMessage(input: BlooioSendMessageInput): Promise<
 
 /** Adds or removes a tapback/emoji reaction on a message. */
 export async function reactBlooioMessage(input: BlooioReactInput): Promise<BlooioApiResponse> {
-  const body: Record<string, unknown> = { reaction: input.reaction };
-  if (input.direction) body.direction = input.direction;
   return callBlooioApi({
     baseUrl: input.baseUrl,
     credentials: input.credentials,
@@ -218,7 +236,7 @@ export async function reactBlooioMessage(input: BlooioReactInput): Promise<Blooi
     path: `/chats/${encodeURIComponent(input.chatId)}/messages/${encodeURIComponent(
       input.messageId,
     )}/reactions`,
-    body,
+    body: { reaction: input.reaction },
   });
 }
 
@@ -232,10 +250,11 @@ export async function startBlooioTyping(
     fetch: input.fetch,
     method: "POST",
     path: `/chats/${encodeURIComponent(input.chatId)}/typing`,
+    body: { state: "started" },
   });
 }
 
-/** Hides the typing indicator in a chat (`DELETE /chats/{chatId}/typing`). */
+/** Hides the typing indicator in a chat (`POST /chats/{chatId}/typing`). */
 export async function stopBlooioTyping(
   input: BlooioApiOptions & { readonly chatId: string },
 ): Promise<BlooioApiResponse> {
@@ -243,8 +262,9 @@ export async function stopBlooioTyping(
     baseUrl: input.baseUrl,
     credentials: input.credentials,
     fetch: input.fetch,
-    method: "DELETE",
+    method: "POST",
     path: `/chats/${encodeURIComponent(input.chatId)}/typing`,
+    body: { state: "stopped" },
   });
 }
 
@@ -261,20 +281,37 @@ export async function markBlooioChatRead(
   });
 }
 
-/** Checks whether a contact supports iMessage, SMS, and/or FaceTime. */
-export async function checkBlooioCapabilities(
-  input: BlooioApiOptions & { readonly contact: string },
+/**
+ * Looks up a phone number's reachability and capabilities
+ * (`GET /phone-numbers/lookup`). Accepts any common phone format.
+ */
+export async function lookupBlooioNumber(
+  input: BlooioApiOptions & { readonly number: string },
 ): Promise<BlooioApiResponse> {
   return callBlooioApi({
     baseUrl: input.baseUrl,
     credentials: input.credentials,
     fetch: input.fetch,
     method: "GET",
-    path: `/contacts/${encodeURIComponent(input.contact)}/capabilities`,
+    path: "/phone-numbers/lookup",
+    query: { number: input.number },
   });
 }
 
-/** Lists messages in a conversation with optional filters. */
+/** Gets a contact's per-identity capabilities (`GET /contacts/{contactId}/capabilities`). */
+export async function getBlooioContactCapabilities(
+  input: BlooioApiOptions & { readonly contactId: string },
+): Promise<BlooioApiResponse> {
+  return callBlooioApi({
+    baseUrl: input.baseUrl,
+    credentials: input.credentials,
+    fetch: input.fetch,
+    method: "GET",
+    path: `/contacts/${encodeURIComponent(input.contactId)}/capabilities`,
+  });
+}
+
+/** Lists messages in a chat with cursor pagination (`GET /chats/{chatId}/messages`). */
 export async function listBlooioMessages(
   input: BlooioListMessagesInput,
 ): Promise<BlooioApiResponse> {
@@ -285,13 +322,35 @@ export async function listBlooioMessages(
     method: "GET",
     path: `/chats/${encodeURIComponent(input.chatId)}/messages`,
     query: {
-      direction: input.direction,
+      cursor: input.cursor,
       limit: input.limit,
-      offset: input.offset,
-      since: input.since,
-      sort: input.sort,
-      until: input.until,
+      order: input.order,
     },
+  });
+}
+
+/** Sends a native poll to a chat (`POST /chats/{chatId}/polls`). */
+export async function sendBlooioPoll(input: BlooioSendPollInput): Promise<BlooioApiResponse> {
+  return callBlooioApi({
+    baseUrl: input.baseUrl,
+    credentials: input.credentials,
+    fetch: input.fetch,
+    method: "POST",
+    path: `/chats/${encodeURIComponent(input.chatId)}/polls`,
+    body: { options: [...input.options], title: input.title },
+  });
+}
+
+/** Shares the sending number's contact card into a chat (`POST /chats/{chatId}/contact-card`). */
+export async function shareBlooioContactCard(
+  input: BlooioApiOptions & { readonly chatId: string },
+): Promise<BlooioApiResponse> {
+  return callBlooioApi({
+    baseUrl: input.baseUrl,
+    credentials: input.credentials,
+    fetch: input.fetch,
+    method: "POST",
+    path: `/chats/${encodeURIComponent(input.chatId)}/contact-card`,
   });
 }
 

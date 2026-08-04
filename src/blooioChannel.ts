@@ -12,19 +12,22 @@ import type { SessionAuthContext } from "eve/context";
 import {
   blooioContinuationToken,
   callBlooioApi,
-  checkBlooioCapabilities,
+  getBlooioContactCapabilities,
   listBlooioMessages,
+  lookupBlooioNumber,
   markBlooioChatRead,
   reactBlooioMessage,
   sendBlooioMessage,
+  sendBlooioPoll,
+  sendBlooioToRecipient,
+  shareBlooioContactCard,
   startBlooioTyping,
   stopBlooioTyping,
   type BlooioApiResponse,
+  type BlooioChannelType,
   type BlooioCredentials,
   type BlooioFetch,
   type BlooioListMessagesInput,
-  type BlooioMessageEffect,
-  type BlooioSendMessageInput,
 } from "./api.js";
 import { defaultEvents, defaultOnMessage } from "./defaults.js";
 import {
@@ -33,10 +36,7 @@ import {
   resolveAttachmentMediaType,
   type BlooioInboundMessage,
 } from "./inbound.js";
-import {
-  verifyBlooioRequest,
-  type BlooioWebhookSecret,
-} from "./verify.js";
+import { verifyBlooioRequest, type BlooioWebhookSecret } from "./verify.js";
 
 /** Pre-dispatch Blooio context passed to the inbound message hook. */
 export interface BlooioContext {
@@ -51,29 +51,36 @@ export interface BlooioChannelContext extends BlooioContext {
 /** Event-handler Blooio context, including session operations. */
 export interface BlooioEventContext extends BlooioChannelContext, ChannelSessionOps {}
 
-/** JSON-serializable durable state for one Blooio conversation. */
+/** JSON-serializable durable state for one Blooio v4 conversation. */
 export interface BlooioChannelState {
-  /** Reply target: phone (E.164), email, or group ID (`grp_...`). */
+  /** Chat id (`chat_...`). The reply target for an active conversation. */
   chatId: string | null;
-  /** Blooio device/number that received the conversation (our line). */
-  internalId: string | null;
+  /** Recipient handle for a proactive conversation before a chat exists. */
+  to: string | null;
+  /** Sender (`from`) for a proactive conversation: phone, alias, or `ch_...`. */
+  from: string | null;
+  /** Channel type of the conversation, e.g. `blooio`. */
+  channelType: string | null;
   /** Sender of the most recent inbound message. */
   sender: string | null;
   /** Whether the conversation is a group chat. */
   isGroup: boolean;
-  /** Most recent inbound Blooio message ID. */
+  /** Group id (`grp_...`) when the conversation is a group. */
+  groupId: string | null;
+  /** Most recent inbound Blooio message id. */
   lastMessageId: string | null;
 }
 
 /** Per-session instrumentation snapshot for Blooio runtime telemetry. */
 export interface BlooioInstrumentationMetadata extends Record<string, unknown> {
   readonly chatId: string | null;
-  readonly internalId: string | null;
+  readonly channelType: string | null;
   readonly isGroup: boolean;
+  readonly groupId: string | null;
   readonly lastMessageId: string | null;
 }
 
-/** Phone-number / sender allow list for inbound Blooio webhook triggers. `"*"` allows everyone. */
+/** Sender allow list for inbound Blooio webhook triggers. `"*"` allows everyone. */
 export type BlooioAllowFrom =
   | string
   | readonly string[]
@@ -89,10 +96,12 @@ export type BlooioInboundResultOrPromise = BlooioInboundResult | Promise<BlooioI
 
 /** Target accepted by `receive(blooio, { target })` for proactive conversations. */
 export interface BlooioReceiveTarget {
-  /** Conversation target: phone (E.164), email, group ID (`grp_...`), or comma-separated recipients. */
-  readonly chatId: string;
-  /** Blooio number to send from, included in the continuation token. */
-  readonly fromNumber?: string;
+  /** Recipient: phone (any common format), email, or opaque provider id. */
+  readonly to: string;
+  /** Exact sender (phone, alias, or `ch_...`). Mutually exclusive with `channelType`. */
+  readonly from?: string;
+  /** Constrain routing to a channel type. Defaults to `blooio` when `from` is omitted. */
+  readonly channelType?: BlooioChannelType;
 }
 
 type BlooioEventHandlerMap = ChannelEvents<BlooioChannelContext>;
@@ -102,34 +111,39 @@ export type BlooioChannelEvents = BlooioEventHandlerMap;
 
 /** Per-call overrides for {@link BlooioHandle.sendMessage}. */
 export interface BlooioSendMessageOptions {
-  /** Recipient. Defaults to the conversation's `chatId`. */
+  /** Chat id override. Defaults to the conversation's `chatId`. */
   readonly chatId?: string;
-  /** Sender number. Defaults to `messaging.fromNumber`, then the inbound `internalId`. */
-  readonly fromNumber?: string;
-  readonly attachments?: BlooioSendMessageInput["attachments"];
-  readonly effect?: BlooioMessageEffect;
-  readonly replyToMessageId?: string;
-  readonly shareContact?: boolean;
-  readonly useTypingIndicator?: boolean;
+  /** Recipient override (routed send). Defaults to the conversation's `to`. */
+  readonly to?: string;
+  /** Sender override (routed send): phone, alias, or `ch_...`. */
+  readonly from?: string;
+  /** Channel type for a routed send. Defaults to the config value, then `blooio`. */
+  readonly channelType?: BlooioChannelType;
+  /** Public https media URLs. */
+  readonly attachments?: readonly string[];
+  /** Idempotency key to de-duplicate sends. */
   readonly idempotencyKey?: string;
 }
 
 /** Low-level Blooio handle exposed to hooks and event handlers. */
 export interface BlooioHandle {
-  /** Reply target bound to this conversation. */
-  readonly chatId: string;
-  /** Blooio number that received this conversation, when known. */
-  readonly internalId: string | undefined;
+  /** Chat id bound to this conversation, when known. */
+  readonly chatId: string | undefined;
+  /** Recipient bound to this conversation, when known. */
+  readonly to: string | undefined;
   /** Sender of the most recent inbound message, when known. */
   readonly sender: string | undefined;
   readonly isGroup: boolean;
-  /** Sends a text and/or attachment message to this conversation by default. */
+  /**
+   * Sends a text and/or attachment message to this conversation. Replies to the
+   * bound chat (`chat_...`) when one exists, otherwise routes to the recipient.
+   */
   sendMessage(message: string, options?: BlooioSendMessageOptions): Promise<BlooioApiResponse>;
   /** Adds (`+`) or removes (`-`) a tapback/emoji reaction on a message. */
   react(
     messageId: string,
     reaction: string,
-    options?: { chatId?: string; direction?: "inbound" | "outbound" },
+    options?: { chatId?: string },
   ): Promise<BlooioApiResponse>;
   /** Shows the typing indicator (iMessage-only). */
   startTyping(chatId?: string): Promise<BlooioApiResponse>;
@@ -137,15 +151,21 @@ export interface BlooioHandle {
   stopTyping(chatId?: string): Promise<BlooioApiResponse>;
   /** Marks the conversation read and sends a read receipt. */
   markRead(chatId?: string): Promise<BlooioApiResponse>;
-  /** Checks whether a contact supports iMessage, SMS, and/or FaceTime. */
-  checkCapabilities(contact?: string): Promise<BlooioApiResponse>;
-  /** Lists messages in the conversation. */
+  /** Sends a native poll to the conversation. */
+  sendPoll(title: string, options: readonly string[], chatId?: string): Promise<BlooioApiResponse>;
+  /** Shares the sending number's contact card into the conversation. */
+  shareContactCard(chatId?: string): Promise<BlooioApiResponse>;
+  /** Looks up a phone number's reachability and capabilities. Defaults to the sender. */
+  lookupNumber(number?: string): Promise<BlooioApiResponse>;
+  /** Gets a contact's per-identity capabilities (`ct_...`). */
+  contactCapabilities(contactId: string): Promise<BlooioApiResponse>;
+  /** Lists messages in the conversation (cursor-paginated). */
   listMessages(
     options?: Omit<BlooioListMessagesInput, "chatId" | "credentials" | "baseUrl" | "fetch"> & {
       chatId?: string;
     },
   ): Promise<BlooioApiResponse>;
-  /** Raw Blooio v2 API escape hatch. `path` is appended to the API base URL. */
+  /** Raw Blooio v4 API escape hatch. `path` is appended to the API base URL. */
   request(
     method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT",
     path: string,
@@ -170,8 +190,10 @@ export interface BlooioChannelConfig {
    * verified sender. Defaults to `"*"`.
    */
   readonly allowFrom?: BlooioAllowFrom;
-  /** Default sender number for outbound replies. Falls back to the inbound `internalId`. */
+  /** Default sender for routed (proactive) sends: phone, alias, or `ch_...`. */
   readonly fromNumber?: string;
+  /** Default channel type for routed sends when no `from` is given. Defaults to `blooio`. */
+  readonly channelType?: BlooioChannelType;
   /** Mark conversations read when an inbound message is received. Defaults to `false`. */
   readonly markReadOnReceive?: boolean;
 
@@ -188,9 +210,20 @@ export interface BlooioChannelConfig {
 export interface BlooioChannel
   extends Channel<BlooioChannelState, BlooioReceiveTarget, BlooioInstrumentationMetadata> {}
 
+const EMPTY_STATE: BlooioChannelState = {
+  channelType: null,
+  chatId: null,
+  from: null,
+  groupId: null,
+  isGroup: false,
+  lastMessageId: null,
+  sender: null,
+  to: null,
+};
+
 /**
  * Blooio channel factory for inbound and outbound iMessage, RCS, and SMS via
- * the Blooio v2 API. Verifies `X-Blooio-Signature` webhooks, dispatches
+ * the Blooio v4 API. Verifies `X-Blooio-Signature` webhooks, dispatches
  * `message.received` events into the agent, and replies through the Blooio
  * REST API.
  */
@@ -207,17 +240,12 @@ export function blooioChannel(config: BlooioChannelConfig = {}): BlooioChannel {
     BlooioInstrumentationMetadata
   >({
     kindHint: "blooio",
-    state: {
-      chatId: null,
-      internalId: null,
-      isGroup: false,
-      lastMessageId: null,
-      sender: null,
-    },
+    state: EMPTY_STATE,
     metadata(state): BlooioInstrumentationMetadata {
       return {
+        channelType: state.channelType,
         chatId: state.chatId,
-        internalId: state.internalId,
+        groupId: state.groupId,
         isGroup: state.isGroup,
         lastMessageId: state.lastMessageId,
       };
@@ -226,13 +254,7 @@ export function blooioChannel(config: BlooioChannelConfig = {}): BlooioChannel {
     context(state): BlooioChannelContext {
       return {
         state,
-        blooio: buildBlooioHandle({
-          chatId: state.chatId ?? "",
-          config,
-          internalId: state.internalId ?? undefined,
-          isGroup: state.isGroup,
-          sender: state.sender ?? undefined,
-        }),
+        blooio: buildBlooioHandle({ config, state }),
       };
     },
 
@@ -242,7 +264,7 @@ export function blooioChannel(config: BlooioChannelConfig = {}): BlooioChannel {
         if (verified === null) return new Response("unauthorized", { status: 401 });
 
         const message = parsePayload(verified.body);
-        // Acknowledge non-inbound events (delivery status, polls, etc.).
+        // Acknowledge non-inbound events (delivery status, polls, typing, etc.).
         if (!message) return new Response("ok");
         if (!(await isAllowed(message.sender, allowFrom))) {
           return new Response("forbidden", { status: 403 });
@@ -254,18 +276,18 @@ export function blooioChannel(config: BlooioChannelConfig = {}): BlooioChannel {
     ],
 
     async receive(input, { send }) {
-      const chatId = input.target.chatId;
-      if (!chatId) throw new Error("blooioChannel().receive requires target.chatId.");
-      const fromNumber = input.target.fromNumber ?? config.fromNumber ?? null;
+      const to = input.target.to;
+      if (!to) throw new Error("blooioChannel().receive requires target.to.");
+      const from = input.target.from ?? config.fromNumber ?? null;
+      const channelType = input.target.channelType ?? config.channelType ?? null;
       return send(input.message, {
         auth: input.auth,
-        continuationToken: blooioContinuationToken(fromNumber ?? undefined, chatId),
+        continuationToken: blooioContinuationToken(to),
         state: {
-          chatId,
-          internalId: fromNumber,
-          isGroup: chatId.startsWith("grp_"),
-          lastMessageId: null,
-          sender: null,
+          ...EMPTY_STATE,
+          channelType,
+          from,
+          to,
         },
       });
     },
@@ -298,6 +320,19 @@ function parsePayload(body: string): BlooioInboundMessage | null {
   return parseBlooioInboundMessage(parsed);
 }
 
+function stateFromInbound(message: BlooioInboundMessage): BlooioChannelState {
+  return {
+    channelType: message.channelType ?? null,
+    chatId: message.chatId,
+    from: message.recipient ?? null,
+    groupId: message.groupId ?? null,
+    isGroup: message.isGroup,
+    lastMessageId: message.messageId ?? null,
+    sender: message.sender ?? null,
+    to: message.sender ?? null,
+  };
+}
+
 async function dispatch(input: {
   readonly config: BlooioChannelConfig;
   readonly message: BlooioInboundMessage;
@@ -305,13 +340,8 @@ async function dispatch(input: {
   readonly send: SendFn<BlooioChannelState>;
 }): Promise<void> {
   const { config, message } = input;
-  const handle = buildBlooioHandle({
-    chatId: message.chatId,
-    config,
-    internalId: message.internalId,
-    isGroup: message.isGroup,
-    sender: message.sender,
-  });
+  const state = stateFromInbound(message);
+  const handle = buildBlooioHandle({ config, state });
 
   if (config.markReadOnReceive) {
     await handle.markRead().catch(() => undefined);
@@ -333,14 +363,8 @@ async function dispatch(input: {
       },
       {
         auth: result.auth,
-        continuationToken: blooioContinuationToken(message.internalId, message.chatId),
-        state: {
-          chatId: message.chatId,
-          internalId: message.internalId ?? null,
-          isGroup: message.isGroup,
-          lastMessageId: message.messageId ?? null,
-          sender: message.sender,
-        },
+        continuationToken: blooioContinuationToken(message.chatId),
+        state,
       },
     )
     .catch(() => undefined);
@@ -349,10 +373,9 @@ async function dispatch(input: {
 /**
  * Builds the delivery content for an inbound message. When the message
  * carries attachments, returns a multimodal `UserContent` array (text part
- * plus one file part per attachment) so the model can see the media.
- * Blooio serves inbound media from a public bucket, so the file-part URLs
- * pass straight through to the model provider. Text-only messages return
- * a plain string.
+ * plus one file part per attachment) so the model can see the media. Blooio
+ * re-hosts inbound media at servable URLs, so the file-part URLs pass straight
+ * through to the model provider. Text-only messages return a plain string.
  */
 function buildInboundMessageContent(message: BlooioInboundMessage): string | UserContent {
   const files = message.attachments.filter(
@@ -368,76 +391,95 @@ function buildInboundMessageContent(message: BlooioInboundMessage): string | Use
       type: "file",
       data: new URL(attachment.url),
       mediaType: resolveAttachmentMediaType(attachment),
-      ...(attachment.name ? { filename: attachment.name } : {}),
     });
   }
   return parts;
 }
 
 function buildBlooioHandle(input: {
-  readonly chatId: string;
   readonly config: BlooioChannelConfig;
-  readonly internalId: string | undefined;
-  readonly isGroup: boolean;
-  readonly sender: string | undefined;
+  readonly state: BlooioChannelState;
 }): BlooioHandle {
-  const { config } = input;
+  const { config, state } = input;
   const shared = {
     baseUrl: config.baseUrl,
     credentials: config.credentials,
     fetch: config.fetch,
   };
-  const defaultFrom = config.fromNumber ?? input.internalId;
+  const boundChatId = state.chatId ?? undefined;
+  const defaultFrom = state.from ?? config.fromNumber ?? undefined;
+  const defaultChannelType = (state.channelType as BlooioChannelType | null) ?? config.channelType;
+
+  function requireChatId(override?: string): string {
+    const chatId = override ?? boundChatId;
+    if (!chatId) throw new Error("blooioChannel: this action requires an active chat.");
+    return chatId;
+  }
 
   return {
-    chatId: input.chatId,
-    internalId: input.internalId,
-    isGroup: input.isGroup,
-    sender: input.sender,
+    chatId: boundChatId,
+    isGroup: state.isGroup,
+    sender: state.sender ?? undefined,
+    to: state.to ?? undefined,
     sendMessage(message, options) {
-      return sendBlooioMessage({
+      const chatId = options?.chatId ?? boundChatId;
+      if (chatId) {
+        return sendBlooioMessage({
+          ...shared,
+          attachments: options?.attachments,
+          chatId,
+          idempotencyKey: options?.idempotencyKey,
+          text: message,
+        });
+      }
+      const to = options?.to ?? state.to ?? undefined;
+      if (!to) throw new Error("blooioChannel: sendMessage requires an active chat or a recipient.");
+      return sendBlooioToRecipient({
         ...shared,
-        chatId: options?.chatId ?? input.chatId,
-        text: message,
         attachments: options?.attachments,
-        effect: options?.effect,
-        fromNumber: options?.fromNumber ?? defaultFrom,
+        channelType: options?.channelType ?? defaultChannelType,
+        from: options?.from ?? defaultFrom,
         idempotencyKey: options?.idempotencyKey,
-        replyToMessageId: options?.replyToMessageId,
-        shareContact: options?.shareContact,
-        useTypingIndicator: options?.useTypingIndicator,
+        text: message,
+        to,
       });
     },
     react(messageId, reaction, options) {
       return reactBlooioMessage({
         ...shared,
-        chatId: options?.chatId ?? input.chatId,
-        direction: options?.direction,
+        chatId: requireChatId(options?.chatId),
         messageId,
         reaction,
       });
     },
     startTyping(chatId) {
-      return startBlooioTyping({ ...shared, chatId: chatId ?? input.chatId });
+      return startBlooioTyping({ ...shared, chatId: requireChatId(chatId) });
     },
     stopTyping(chatId) {
-      return stopBlooioTyping({ ...shared, chatId: chatId ?? input.chatId });
+      return stopBlooioTyping({ ...shared, chatId: requireChatId(chatId) });
     },
     markRead(chatId) {
-      return markBlooioChatRead({ ...shared, chatId: chatId ?? input.chatId });
+      return markBlooioChatRead({ ...shared, chatId: requireChatId(chatId) });
     },
-    checkCapabilities(contact) {
-      const target = contact ?? input.sender;
-      if (!target) {
-        throw new Error("blooioChannel: checkCapabilities requires a contact.");
-      }
-      return checkBlooioCapabilities({ ...shared, contact: target });
+    sendPoll(title, options, chatId) {
+      return sendBlooioPoll({ ...shared, chatId: requireChatId(chatId), options, title });
+    },
+    shareContactCard(chatId) {
+      return shareBlooioContactCard({ ...shared, chatId: requireChatId(chatId) });
+    },
+    lookupNumber(number) {
+      const target = number ?? state.sender ?? undefined;
+      if (!target) throw new Error("blooioChannel: lookupNumber requires a number.");
+      return lookupBlooioNumber({ ...shared, number: target });
+    },
+    contactCapabilities(contactId) {
+      return getBlooioContactCapabilities({ ...shared, contactId });
     },
     listMessages(options) {
       return listBlooioMessages({
         ...shared,
         ...options,
-        chatId: options?.chatId ?? input.chatId,
+        chatId: requireChatId(options?.chatId),
       });
     },
     request(method, path, body, query) {
@@ -446,8 +488,12 @@ function buildBlooioHandle(input: {
   };
 }
 
-async function isAllowed(sender: string, allowFrom: BlooioAllowFrom): Promise<boolean> {
+async function isAllowed(
+  sender: string | undefined,
+  allowFrom: BlooioAllowFrom,
+): Promise<boolean> {
   const resolved = typeof allowFrom === "function" ? await allowFrom() : allowFrom;
   if (resolved === "*") return true;
+  if (!sender) return false;
   return typeof resolved === "string" ? resolved === sender : resolved.includes(sender);
 }
