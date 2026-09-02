@@ -13,6 +13,22 @@ function getPostHandler(channel: ReturnType<typeof blooioChannel>) {
   return route.handler;
 }
 
+/**
+ * Builds the route-handler args eve 0.43+ passes as the second argument. The
+ * inbound route creates sessions via `from(address).send(message, options)`,
+ * so `from` returns a stub bound to the shared `send` spy.
+ */
+function mockRouteArgs() {
+  const send = vi.fn(async () => ({ id: "session_1" }));
+  const from = vi.fn((_address: string) => ({ send }));
+  const tasks: Promise<unknown>[] = [];
+  const waitUntil = (task: Promise<unknown>) => {
+    tasks.push(task);
+  };
+  const settle = () => Promise.all(tasks);
+  return { from, send, settle, waitUntil };
+}
+
 /** Build a signed native v4 `message.received` webhook request. */
 function signedWebhook(data: Record<string, unknown>, type = "message.received"): Request {
   const body = JSON.stringify({
@@ -34,9 +50,7 @@ describe("blooioChannel inbound route", () => {
   it("dispatches a verified message.received webhook keyed by chat id", async () => {
     const channel = blooioChannel({ credentials: { apiKey: "bl_live", webhookSecret: SECRET } });
     const handler = getPostHandler(channel);
-
-    const send = vi.fn(async () => ({ id: "session_1" }));
-    const tasks: Promise<unknown>[] = [];
+    const { from, send, settle, waitUntil } = mockRouteArgs();
 
     const res = await handler(
       signedWebhook({
@@ -47,15 +61,15 @@ describe("blooioChannel inbound route", () => {
         recipient: "+15557654321",
         text: "hello",
       }),
-      { send, waitUntil: (task: Promise<unknown>) => tasks.push(task) },
+      { from, waitUntil },
     );
-    await Promise.all(tasks);
+    await settle();
 
     expect(res.status).toBe(200);
+    expect(from).toHaveBeenCalledWith("chat_abc");
     expect(send).toHaveBeenCalledTimes(1);
-    const [payload, options] = send.mock.calls[0] as unknown as [any, any];
-    expect(payload.message).toBe("hello");
-    expect(options.continuationToken).toBe("chat_abc");
+    const [message, options] = send.mock.calls[0] as unknown as [any, any];
+    expect(message).toBe("hello");
     expect(options.state.chatId).toBe("chat_abc");
     expect(options.state.channelType).toBe("blooio");
   });
@@ -63,9 +77,8 @@ describe("blooioChannel inbound route", () => {
   it("forwards inbound attachments as multimodal file parts", async () => {
     const channel = blooioChannel({ credentials: { apiKey: "bl_live", webhookSecret: SECRET } });
     const handler = getPostHandler(channel);
+    const { from, send, settle, waitUntil } = mockRouteArgs();
 
-    const send = vi.fn(async () => ({ id: "session_1" }));
-    const tasks: Promise<unknown>[] = [];
     await handler(
       signedWebhook({
         message_id: "msg_2",
@@ -76,26 +89,23 @@ describe("blooioChannel inbound route", () => {
           { url: "https://bucket.blooio.com/api-attachments/abc.png", media_type: "image/png" },
         ],
       }),
-      { send, waitUntil: (task: Promise<unknown>) => tasks.push(task) },
+      { from, waitUntil },
     );
-    await Promise.all(tasks);
+    await settle();
 
-    const [payload] = send.mock.calls[0] as unknown as [any, any];
-    expect(Array.isArray(payload.message)).toBe(true);
-    expect(payload.message[0]).toEqual({ type: "text", text: "look at this" });
-    expect(payload.message[1].type).toBe("file");
-    expect(payload.message[1].mediaType).toBe("image/png");
-    expect(String(payload.message[1].data)).toBe(
-      "https://bucket.blooio.com/api-attachments/abc.png",
-    );
+    const [message] = send.mock.calls[0] as unknown as [any, any];
+    expect(Array.isArray(message)).toBe(true);
+    expect(message[0]).toEqual({ type: "text", text: "look at this" });
+    expect(message[1].type).toBe("file");
+    expect(message[1].mediaType).toBe("image/png");
+    expect(String(message[1].data)).toBe("https://bucket.blooio.com/api-attachments/abc.png");
   });
 
   it("infers the media type from the URL when none is provided", async () => {
     const channel = blooioChannel({ credentials: { apiKey: "bl_live", webhookSecret: SECRET } });
     const handler = getPostHandler(channel);
+    const { from, send, settle, waitUntil } = mockRouteArgs();
 
-    const send = vi.fn(async () => ({ id: "session_1" }));
-    const tasks: Promise<unknown>[] = [];
     await handler(
       signedWebhook({
         chat_id: "chat_abc",
@@ -103,40 +113,42 @@ describe("blooioChannel inbound route", () => {
         text: "",
         attachments: [{ url: "https://bucket.blooio.com/api-attachments/clip.mov" }],
       }),
-      { send, waitUntil: (task: Promise<unknown>) => tasks.push(task) },
+      { from, waitUntil },
     );
-    await Promise.all(tasks);
+    await settle();
 
-    const [payload] = send.mock.calls[0] as unknown as [any, any];
-    expect(Array.isArray(payload.message)).toBe(true);
-    expect(payload.message).toHaveLength(1);
-    expect(payload.message[0].type).toBe("file");
-    expect(payload.message[0].mediaType).toBe("video/quicktime");
+    const [message] = send.mock.calls[0] as unknown as [any, any];
+    expect(Array.isArray(message)).toBe(true);
+    expect(message).toHaveLength(1);
+    expect(message[0].type).toBe("file");
+    expect(message[0].mediaType).toBe("video/quicktime");
   });
 
   it("rejects an unsigned webhook", async () => {
     const channel = blooioChannel({ credentials: { apiKey: "bl_live", webhookSecret: SECRET } });
     const handler = getPostHandler(channel);
+    const { from } = mockRouteArgs();
     const res = await handler(
       new Request("https://example.com/eve/v1/blooio", {
         method: "POST",
         body: JSON.stringify({ type: "message.received", data: { chat_id: "chat_x" } }),
       }),
-      { send: vi.fn(), waitUntil: () => {} },
+      { from, waitUntil: () => {} },
     );
     expect(res.status).toBe(401);
+    expect(from).not.toHaveBeenCalled();
   });
 
   it("acks non-received events without dispatching", async () => {
     const channel = blooioChannel({ credentials: { apiKey: "bl_live", webhookSecret: SECRET } });
     const handler = getPostHandler(channel);
-    const send = vi.fn();
+    const { from } = mockRouteArgs();
     const res = await handler(
       signedWebhook({ message_id: "msg_1", chat_id: "chat_x" }, "message.delivered"),
-      { send, waitUntil: () => {} },
+      { from, waitUntil: () => {} },
     );
     expect(res.status).toBe(200);
-    expect(send).not.toHaveBeenCalled();
+    expect(from).not.toHaveBeenCalled();
   });
 
   it("honors an allowFrom list", async () => {
@@ -145,13 +157,13 @@ describe("blooioChannel inbound route", () => {
       allowFrom: ["+15559999999"],
     });
     const handler = getPostHandler(channel);
-    const send = vi.fn();
+    const { from } = mockRouteArgs();
     const res = await handler(
       signedWebhook({ chat_id: "chat_x", sender: "+15551234567", text: "hi" }),
-      { send, waitUntil: () => {} },
+      { from, waitUntil: () => {} },
     );
     expect(res.status).toBe(403);
-    expect(send).not.toHaveBeenCalled();
+    expect(from).not.toHaveBeenCalled();
   });
 });
 

@@ -3,9 +3,9 @@ import {
   defineChannel,
   POST,
   type Channel,
+  type ChannelContinuationOps,
   type ChannelEvents,
-  type ChannelSessionOps,
-  type SendFn,
+  type ChannelFrom,
 } from "eve/channels";
 import type { SessionAuthContext } from "eve/context";
 
@@ -48,8 +48,8 @@ export interface BlooioChannelContext extends BlooioContext {
   state: BlooioChannelState;
 }
 
-/** Event-handler Blooio context, including session operations. */
-export interface BlooioEventContext extends BlooioChannelContext, ChannelSessionOps {}
+/** Event-handler Blooio context, including continuation routing. */
+export type BlooioEventContext = BlooioChannelContext & ChannelContinuationOps;
 
 /** JSON-serializable durable state for one Blooio v4 conversation. */
 export interface BlooioChannelState {
@@ -259,7 +259,7 @@ export function blooioChannel(config: BlooioChannelConfig = {}): BlooioChannel {
     },
 
     routes: [
-      POST<BlooioChannelState>(route, async (req, { send, waitUntil }) => {
+      POST<BlooioChannelState>(route, async (req, { from, waitUntil }) => {
         const verified = await verifyInbound(req, config);
         if (verified === null) return new Response("unauthorized", { status: 401 });
 
@@ -270,23 +270,22 @@ export function blooioChannel(config: BlooioChannelConfig = {}): BlooioChannel {
           return new Response("forbidden", { status: 403 });
         }
 
-        waitUntil(dispatch({ config, message, onMessage, send }));
+        waitUntil(dispatch({ config, from, message, onMessage }));
         return new Response("ok");
       }),
     ],
 
-    async receive(input, { send }) {
+    async receive(input, { from }) {
       const to = input.target.to;
       if (!to) throw new Error("blooioChannel().receive requires target.to.");
-      const from = input.target.from ?? config.fromNumber ?? null;
+      const fromAddress = input.target.from ?? config.fromNumber ?? null;
       const channelType = input.target.channelType ?? config.channelType ?? null;
-      return send(input.message, {
+      return from(blooioContinuationToken(to)).send(input.message, {
         auth: input.auth,
-        continuationToken: blooioContinuationToken(to),
         state: {
           ...EMPTY_STATE,
           channelType,
-          from,
+          from: fromAddress,
           to,
         },
       });
@@ -335,11 +334,11 @@ function stateFromInbound(message: BlooioInboundMessage): BlooioChannelState {
 
 async function dispatch(input: {
   readonly config: BlooioChannelConfig;
+  readonly from: ChannelFrom<BlooioChannelState>;
   readonly message: BlooioInboundMessage;
   readonly onMessage: NonNullable<BlooioChannelConfig["onMessage"]>;
-  readonly send: SendFn<BlooioChannelState>;
 }): Promise<void> {
-  const { config, message } = input;
+  const { config, from, message } = input;
   const state = stateFromInbound(message);
   const handle = buildBlooioHandle({ config, state });
 
@@ -355,18 +354,12 @@ async function dispatch(input: {
   }
   if (!result) return;
 
-  await input
-    .send(
-      {
-        message: buildInboundMessageContent(message),
-        context: [formatBlooioContextBlock(message)],
-      },
-      {
-        auth: result.auth,
-        continuationToken: blooioContinuationToken(message.chatId),
-        state,
-      },
-    )
+  await from(blooioContinuationToken(message.chatId))
+    .send(buildInboundMessageContent(message), {
+      auth: result.auth,
+      context: [formatBlooioContextBlock(message)],
+      state,
+    })
     .catch(() => undefined);
 }
 

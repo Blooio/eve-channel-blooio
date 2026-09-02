@@ -1,6 +1,6 @@
 {
   "name": "eve-channel-blooio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Blooio channel for Vercel eve. Send and receive iMessage, RCS, and SMS through the Blooio v4 API, with tapback reactions, typing indicators, read receipts, polls, groups, capability checks, and history.",
   "license": "MIT",
   "type": "module",
@@ -56,12 +56,12 @@
     "release": "release-it"
   },
   "peerDependencies": {
-    "ai": ">=7.0.0-beta.178",
-    "eve": ">=0.11.0"
+    "ai": ">=7.0.0",
+    "eve": ">=0.43.0"
   },
   "devDependencies": {
-    "ai": "7.0.0-beta.178",
-    "eve": "latest",
+    "ai": "^7.0.82",
+    "eve": "0.48.0",
     "@types/node": "^22.0.0",
     "release-it": "^20.2.0",
     "typescript": "^5.6.0",
