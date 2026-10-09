@@ -60,8 +60,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run clean && npm run build",
-    "release": "release-it"
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "peerDependencies": {
     "ai": ">=7.0.0",
@@ -71,7 +70,6 @@
     "@types/node": "^22.0.0",
     "ai": "^7.0.137",
     "eve": "^0.76.0",
-    "release-it": "^20.2.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0",
     "zod": "^4.6.5"

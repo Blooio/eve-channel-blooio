@@ -1,73 +1,94 @@
-# Publishes eve-channel-blooio to npm on every version tag push, with an npm
-# provenance attestation so anyone can cryptographically verify the package was
-# built by this exact workflow, from this exact repository and commit.
+# Publishes eve-channel-blooio to npm whenever main has a package.json version
+# that isn't on npm yet, then tags vX.Y.Z and creates a GitHub release.
 #
-# ─── ONE-TIME SETUP ────────────────────────────────────────────────────────────
+# Authentication is npm Trusted Publishing (GitHub OIDC): no npm token is stored
+# anywhere, and every release carries a provenance attestation linking it to
+# this repository, workflow, and commit. The trusted publisher on npmjs.com must
+# match: owner Blooio, repository eve-channel-blooio, workflow publish.yml,
+# environment npm.
 #
-# Option A — OIDC Trusted Publishing (recommended, no long-lived secrets):
-#   1. Log in to npmjs.com and open the eve-channel-blooio package settings.
-#   2. Under "Publish access" -> "Trusted Publishers", click "Add a publisher".
-#   3. Select GitHub Actions and fill in:
-#        Repository owner: Blooio
-#        Repository name:  eve-channel-blooio
-#        Workflow name:    publish.yml
-#        Environment:      (leave blank)
-#   4. Leave the NPM_TOKEN secret unset. GitHub's OIDC token is used instead.
-#
-# Option B — npm Automation Token (fallback):
-#   1. npmjs.com -> Access Tokens -> Generate a Granular Access Token scoped to
-#      this package with read/write publish permission.
-#   2. GitHub -> repo Settings -> Secrets and variables -> Actions -> New secret
-#      named NPM_TOKEN.
-#
-# ─── RELEASE PROCESS ───────────────────────────────────────────────────────────
-#
-# Run `npm run release` locally to lint, test, build, bump the version, tag
-# (vX.Y.Z) and push — which triggers this workflow.
+# To release: bump "version" in package.json (npm version patch|minor|major
+# --no-git-tag-version) and merge to main.
 
 name: Publish
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compare package.json with npm
+        id: version
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already on npm; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$name@$version is not on npm yet; publishing."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
   publish:
     name: Publish to npm
+    needs: check
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
-
+    environment: npm
     permissions:
-      # Required to mint an OIDC token for npm provenance attestation.
+      contents: write
       id-token: write
-      contents: read
-
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "lts/*"
-          cache: "npm"
-          registry-url: "https://registry.npmjs.org"
+          node-version: 24
+          cache: npm
 
+      # Trusted publishing requires npm >= 11.5.1.
       - name: Update npm
-        # OIDC trusted publishing requires npm >= 11.5.1; Node LTS ships npm 10.x.
         run: npm install -g npm@latest
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Test
-        run: npm test
-
-      - name: Build
-        run: npm run build
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
 
       - name: Publish
         run: |
-          [ -n "$NPM_TOKEN" ] && npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
-          npm publish --provenance --access public
+          case "$VERSION" in
+            *-*) npm publish --provenance --access public --tag next ;;
+            *) npm publish --provenance --access public ;;
+          esac
+
+      - name: Tag and create GitHub release
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Release v$VERSION already exists."
+            exit 0
+          fi
+          prerelease=""
+          case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes $prerelease

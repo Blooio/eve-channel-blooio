@@ -234,6 +234,10 @@ On Apple Messages for Business, only target a customer who has already messaged 
 
 Inbound conversations are keyed as `blooio:<chatId>` so a thread stays bound to its Blooio chat. Use `blooioContinuationToken(chatId)` to build the channel-local token.
 
+## Releasing
+
+Releases are automated. Bump `version` in `package.json` (`npm version patch|minor|major --no-git-tag-version`) and merge to `main`. The Publish workflow tests, builds, and publishes to npm through [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) with a provenance attestation, then tags `vX.Y.Z` and creates a GitHub release. Prerelease versions (`1.2.0-beta.1`) publish under the `next` tag.
+
 ## License
 
 MIT © Blooio
