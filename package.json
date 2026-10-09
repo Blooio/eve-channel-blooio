@@ -1,7 +1,7 @@
 {
   "name": "eve-channel-blooio",
-  "version": "0.2.1",
-  "description": "Blooio channel for Vercel eve. Send and receive iMessage, RCS, and SMS through the Blooio v4 API, with tapback reactions, typing indicators, read receipts, polls, groups, capability checks, and history.",
+  "version": "0.3.0",
+  "description": "Blooio channel for Vercel eve. Send and receive iMessage, RCS, SMS, and Apple Messages for Business through the Blooio v4 API, with interactive messages (quick replies, list and time pickers, forms), tapback reactions, typing indicators, read receipts, polls, groups, capability checks, and history.",
   "license": "MIT",
   "type": "module",
   "author": {
@@ -24,6 +24,9 @@
     "imessage",
     "rcs",
     "sms",
+    "apple-messages-for-business",
+    "apple-business-chat",
+    "amb",
     "agent",
     "ai-agent"
   ],
@@ -32,6 +35,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./tools": {
+      "types": "./dist/tools.d.ts",
+      "import": "./dist/tools.js",
+      "default": "./dist/tools.js"
     },
     "./package.json": "./package.json"
   },
@@ -60,11 +68,12 @@
     "eve": ">=0.43.0"
   },
   "devDependencies": {
-    "ai": "^7.0.82",
-    "eve": "0.48.0",
     "@types/node": "^22.0.0",
+    "ai": "^7.0.137",
+    "eve": "^0.76.0",
     "release-it": "^20.2.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.0",
+    "zod": "^4.6.5"
   }
 }

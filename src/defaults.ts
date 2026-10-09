@@ -11,6 +11,7 @@ import type {
 export function defaultBlooioAuth(message: BlooioInboundMessage): SessionAuthContext {
   const attributes: Record<string, string> = {
     channel: message.isGroup ? "group" : "direct",
+    chat_id: message.chatId,
   };
   if (message.sender) attributes.from = message.sender;
   if (message.recipient) attributes.to = message.recipient;
@@ -37,8 +38,17 @@ export function defaultOnMessage(
   return { auth: defaultBlooioAuth(message) };
 }
 
-/** Built-in Blooio event handlers for text delivery and terminal errors. */
+/**
+ * Built-in Blooio event handlers for text delivery and terminal errors. On
+ * Apple Messages for Business, a typing indicator is shown while the agent
+ * works, as Apple's Experience Review expects before bot replies.
+ */
 export const defaultEvents: BlooioChannelEvents = {
+  async "turn.started"(_event, channel) {
+    if (!channel.blooio.isAppleMessagesForBusiness || !channel.blooio.chatId) return;
+    await channel.blooio.startTyping().catch(() => undefined);
+  },
+
   async "message.completed"(event, channel) {
     if (event.finishReason === "tool-calls" || !event.message) return;
     await channel.blooio.sendMessage(event.message);

@@ -12,6 +12,7 @@ import type { SessionAuthContext } from "eve/context";
 import {
   blooioContinuationToken,
   callBlooioApi,
+  getBlooioChat,
   getBlooioContactCapabilities,
   listBlooioMessages,
   lookupBlooioNumber,
@@ -27,7 +28,10 @@ import {
   type BlooioChannelType,
   type BlooioCredentials,
   type BlooioFetch,
+  type BlooioInteractive,
+  type BlooioInvitation,
   type BlooioListMessagesInput,
+  type BlooioMessageContent,
 } from "./api.js";
 import { defaultEvents, defaultOnMessage } from "./defaults.js";
 import {
@@ -59,7 +63,7 @@ export interface BlooioChannelState {
   to: string | null;
   /** Sender (`from`) for a proactive conversation: phone, alias, or `ch_...`. */
   from: string | null;
-  /** Channel type of the conversation, e.g. `blooio`. */
+  /** Channel type of the conversation, e.g. `blooio` or `amb`. */
   channelType: string | null;
   /** Sender of the most recent inbound message. */
   sender: string | null;
@@ -94,11 +98,16 @@ export type BlooioInboundResult = {
 /** Sync or async {@link BlooioInboundResult}. */
 export type BlooioInboundResultOrPromise = BlooioInboundResult | Promise<BlooioInboundResult>;
 
-/** Target accepted by `receive(blooio, { target })` for proactive conversations. */
+/**
+ * Target accepted by `receive(blooio, { target })` for proactive conversations.
+ * Apple Messages for Business is inbound-first: target a customer's opaque id
+ * only after they have messaged you, or start with
+ * {@link BlooioHandle.sendInvitation}.
+ */
 export interface BlooioReceiveTarget {
   /** Recipient: phone (any common format), email, or opaque provider id. */
   readonly to: string;
-  /** Exact sender (phone, alias, or `ch_...`). Mutually exclusive with `channelType`. */
+  /** Exact sender (phone, alias such as `support`, or `ch_...`). Mutually exclusive with `channelType`. */
   readonly from?: string;
   /** Constrain routing to a channel type. Defaults to `blooio` when `from` is omitted. */
   readonly channelType?: BlooioChannelType;
@@ -121,7 +130,21 @@ export interface BlooioSendMessageOptions {
   readonly channelType?: BlooioChannelType;
   /** Public https media URLs. */
   readonly attachments?: readonly string[];
+  /** `markdown` sends iMessage rich text. Blooio iMessage only. */
+  readonly format?: "plain" | "markdown";
+  /** Message id to reply to. */
+  readonly replyTo?: string;
   /** Idempotency key to de-duplicate sends. */
+  readonly idempotencyKey?: string;
+}
+
+/** Parameters for {@link BlooioHandle.sendInvitation}. */
+export interface BlooioSendInvitationInput {
+  /** Opted-in phone number, e.g. `tel:+15551234567` or `+15551234567`. */
+  readonly to: string;
+  /** Apple Messages for Business channel alias or `ch_...`. Defaults to the conversation's sender. */
+  readonly from?: string;
+  readonly invitation: BlooioInvitation;
   readonly idempotencyKey?: string;
 }
 
@@ -134,18 +157,45 @@ export interface BlooioHandle {
   /** Sender of the most recent inbound message, when known. */
   readonly sender: string | undefined;
   readonly isGroup: boolean;
+  /** Channel type of the conversation (`blooio`, `amb`, ...), when known. */
+  readonly channelType: string | undefined;
+  /** True for an Apple Messages for Business conversation. */
+  readonly isAppleMessagesForBusiness: boolean;
   /**
    * Sends a text and/or attachment message to this conversation. Replies to the
    * bound chat (`chat_...`) when one exists, otherwise routes to the recipient.
    */
   sendMessage(message: string, options?: BlooioSendMessageOptions): Promise<BlooioApiResponse>;
+  /**
+   * Sends an Apple Messages for Business interactive message (quick reply,
+   * list picker, time picker, form, Apple Pay, sign in, or custom iMessage app).
+   */
+  sendInteractive(
+    interactive: BlooioInteractive,
+    options?: Omit<BlooioSendMessageOptions, "attachments" | "format">,
+  ): Promise<BlooioApiResponse>;
+  /** Sends a tappable rich link card. */
+  sendRichLink(
+    url: string,
+    title?: string,
+    options?: Omit<BlooioSendMessageOptions, "attachments" | "format">,
+  ): Promise<BlooioApiResponse>;
+  /** Sends an Apple Messages for Business invitation to start a business-first conversation. */
+  sendInvitation(input: BlooioSendInvitationInput): Promise<BlooioApiResponse>;
+  /** Gets the chat, including `state` and (for Apple Messages for Business) `supported_interactive_kinds`. */
+  getChat(chatId?: string): Promise<BlooioApiResponse>;
+  /**
+   * Interactive kinds the customer's device can render, from the chat's
+   * `supported_interactive_kinds`. Empty when unknown.
+   */
+  supportedInteractiveKinds(chatId?: string): Promise<readonly string[]>;
   /** Adds (`+`) or removes (`-`) a tapback/emoji reaction on a message. */
   react(
     messageId: string,
     reaction: string,
     options?: { chatId?: string },
   ): Promise<BlooioApiResponse>;
-  /** Shows the typing indicator (iMessage-only). */
+  /** Shows the typing indicator (iMessage and Apple Messages for Business). */
   startTyping(chatId?: string): Promise<BlooioApiResponse>;
   /** Hides the typing indicator. */
   stopTyping(chatId?: string): Promise<BlooioApiResponse>;
@@ -155,7 +205,10 @@ export interface BlooioHandle {
   sendPoll(title: string, options: readonly string[], chatId?: string): Promise<BlooioApiResponse>;
   /** Shares the sending number's contact card into the conversation. */
   shareContactCard(chatId?: string): Promise<BlooioApiResponse>;
-  /** Looks up a phone number's reachability and capabilities. Defaults to the sender. */
+  /**
+   * Looks up a phone number's reachability and capabilities. Defaults to the
+   * sender, except on Apple Messages for Business where the sender is opaque.
+   */
   lookupNumber(number?: string): Promise<BlooioApiResponse>;
   /** Gets a contact's per-identity capabilities (`ct_...`). */
   contactCapabilities(contactId: string): Promise<BlooioApiResponse>;
@@ -222,8 +275,8 @@ const EMPTY_STATE: BlooioChannelState = {
 };
 
 /**
- * Blooio channel factory for inbound and outbound iMessage, RCS, and SMS via
- * the Blooio v4 API. Verifies `X-Blooio-Signature` webhooks, dispatches
+ * Blooio channel factory for inbound and outbound iMessage, RCS, SMS, and
+ * Apple Messages for Business via the Blooio v4 API. Verifies `X-Blooio-Signature` webhooks, dispatches
  * `message.received` events into the agent, and replies through the Blooio
  * REST API.
  */
@@ -403,39 +456,69 @@ function buildBlooioHandle(input: {
   const defaultFrom = state.from ?? config.fromNumber ?? undefined;
   const defaultChannelType = (state.channelType as BlooioChannelType | null) ?? config.channelType;
 
+  const isAmb = state.channelType === "amb";
+
   function requireChatId(override?: string): string {
     const chatId = override ?? boundChatId;
     if (!chatId) throw new Error("blooioChannel: this action requires an active chat.");
     return chatId;
   }
 
+  function sendContent(
+    content: BlooioMessageContent,
+    options: BlooioSendMessageOptions | undefined,
+  ): Promise<BlooioApiResponse> {
+    const delivery = {
+      ...shared,
+      ...content,
+      idempotencyKey: options?.idempotencyKey,
+      replyTo: options?.replyTo,
+    };
+    const chatId = options?.chatId ?? boundChatId;
+    if (chatId) return sendBlooioMessage({ ...delivery, chatId });
+    const to = options?.to ?? state.to ?? undefined;
+    if (!to) throw new Error("blooioChannel: sending requires an active chat or a recipient.");
+    return sendBlooioToRecipient({
+      ...delivery,
+      channelType: options?.channelType ?? defaultChannelType,
+      from: options?.from ?? defaultFrom,
+      to,
+    });
+  }
+
+  async function getChat(chatId?: string): Promise<BlooioApiResponse> {
+    return getBlooioChat({ ...shared, chatId: requireChatId(chatId) });
+  }
+
   return {
+    channelType: state.channelType ?? undefined,
     chatId: boundChatId,
+    isAppleMessagesForBusiness: isAmb,
     isGroup: state.isGroup,
     sender: state.sender ?? undefined,
     to: state.to ?? undefined,
     sendMessage(message, options) {
-      const chatId = options?.chatId ?? boundChatId;
-      if (chatId) {
-        return sendBlooioMessage({
-          ...shared,
-          attachments: options?.attachments,
-          chatId,
-          idempotencyKey: options?.idempotencyKey,
-          text: message,
-        });
-      }
-      const to = options?.to ?? state.to ?? undefined;
-      if (!to) throw new Error("blooioChannel: sendMessage requires an active chat or a recipient.");
-      return sendBlooioToRecipient({
-        ...shared,
-        attachments: options?.attachments,
-        channelType: options?.channelType ?? defaultChannelType,
-        from: options?.from ?? defaultFrom,
-        idempotencyKey: options?.idempotencyKey,
-        text: message,
-        to,
-      });
+      return sendContent(
+        { attachments: options?.attachments, format: options?.format, text: message },
+        options,
+      );
+    },
+    sendInteractive(interactive, options) {
+      return sendContent({ interactive }, options);
+    },
+    sendRichLink(url, title, options) {
+      return sendContent({ richLink: title ? { title, url } : { url } }, options);
+    },
+    sendInvitation({ to, from, invitation, idempotencyKey }) {
+      const sender = from ?? defaultFrom;
+      if (!sender) throw new Error("blooioChannel: sendInvitation requires an Apple Messages for Business `from` alias.");
+      return sendBlooioToRecipient({ ...shared, from: sender, idempotencyKey, invitation, to });
+    },
+    getChat,
+    async supportedInteractiveKinds(chatId) {
+      const res = await getChat(chatId);
+      if (!res.ok) throw new Error(`blooioChannel: getting chat failed with status ${res.status}.`);
+      return readSupportedInteractiveKinds(res.body);
     },
     react(messageId, reaction, options) {
       return reactBlooioMessage({
@@ -461,7 +544,7 @@ function buildBlooioHandle(input: {
       return shareBlooioContactCard({ ...shared, chatId: requireChatId(chatId) });
     },
     lookupNumber(number) {
-      const target = number ?? state.sender ?? undefined;
+      const target = number ?? (isAmb ? undefined : (state.sender ?? undefined));
       if (!target) throw new Error("blooioChannel: lookupNumber requires a number.");
       return lookupBlooioNumber({ ...shared, number: target });
     },
@@ -479,6 +562,14 @@ function buildBlooioHandle(input: {
       return callBlooioApi({ ...shared, body, method, path, query });
     },
   };
+}
+
+function readSupportedInteractiveKinds(body: unknown): string[] {
+  if (typeof body !== "object" || body === null) return [];
+  const record = body as Record<string, unknown>;
+  const chat = typeof record.data === "object" && record.data !== null ? (record.data as Record<string, unknown>) : record;
+  const kinds = chat.supported_interactive_kinds;
+  return Array.isArray(kinds) ? kinds.filter((kind): kind is string => typeof kind === "string") : [];
 }
 
 async function isAllowed(

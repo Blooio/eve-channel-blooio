@@ -136,6 +136,74 @@ describe("formatBlooioContextBlock", () => {
     expect(block).toContain("from: +15551234567");
     expect(block).toContain("chat_id: chat_abc");
     expect(block).toContain("message_id: msg_1");
+    expect(block).toContain("response_medium: imessage");
     expect(block).toContain("</blooio_context>");
+  });
+
+  it("marks Apple Messages for Business conversations and surfaces interactive replies", () => {
+    const message = parseBlooioInboundMessage(
+      envelope({
+        message_id: "msg_2",
+        chat_id: "chat_amb",
+        channel_type: "amb",
+        sender: "urn:mbid:opaque",
+        recipient: "support",
+        text: "Haircut",
+        interactive: { role: "reply", kind: "list_picker", chosen: ["Haircut"], request_identifier: "svc-1" },
+      }),
+    );
+    const block = formatBlooioContextBlock(message!);
+    expect(block).toContain("response_medium: apple_messages_for_business");
+    expect(block).toContain("channel_type: amb");
+    expect(block).toContain("interactive_reply: list_picker");
+    expect(block).toContain("interactive_chosen: Haircut");
+    expect(block).toContain("interactive_request_identifier: svc-1");
+  });
+});
+
+describe("Apple Messages for Business interactive replies", () => {
+  it("parses a form reply with per-page responses", () => {
+    const message = parseBlooioInboundMessage(
+      envelope({
+        chat_id: "chat_amb",
+        channel_type: "amb",
+        sender: "urn:mbid:opaque",
+        text: "J. Appleseed, jappleseed@example.com",
+        interactive: {
+          role: "reply",
+          kind: "form",
+          chosen: ["J. Appleseed", "jappleseed@example.com"],
+          responses: [{ page_identifier: "details", answers: [{ identifier: "name", value: "J. Appleseed" }] }],
+        },
+      }),
+    );
+    expect(message?.interactiveReply).toEqual({
+      chosen: ["J. Appleseed", "jappleseed@example.com"],
+      kind: "form",
+      label: undefined,
+      requestIdentifier: undefined,
+      responses: [{ page_identifier: "details", answers: [{ identifier: "name", value: "J. Appleseed" }] }],
+    });
+  });
+
+  it("reads the reply from metadata.interactive", () => {
+    const message = parseBlooioInboundMessage(
+      envelope({
+        chat_id: "chat_amb",
+        channel_type: "amb",
+        text: "Support",
+        metadata: { interactive: { role: "reply", kind: "quick_reply", chosen: ["Support"] } },
+      }),
+    );
+    expect(message?.interactiveReply?.kind).toBe("quick_reply");
+    expect(message?.interactiveReply?.chosen).toEqual(["Support"]);
+  });
+
+  it("ignores outbound interactive prompts", () => {
+    const message = parseBlooioInboundMessage(
+      envelope({ chat_id: "chat_amb", channel_type: "amb", interactive: { role: "prompt", kind: "quick_reply" } }),
+    );
+    expect(message?.interactive).toBeDefined();
+    expect(message?.interactiveReply).toBeUndefined();
   });
 });

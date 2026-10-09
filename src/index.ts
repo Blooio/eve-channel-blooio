@@ -13,6 +13,7 @@ export {
   type BlooioInboundResultOrPromise,
   type BlooioInstrumentationMetadata,
   type BlooioReceiveTarget,
+  type BlooioSendInvitationInput,
   type BlooioSendMessageOptions,
 } from "./blooioChannel.js";
 
@@ -20,6 +21,7 @@ export {
   blooioContinuationToken,
   callBlooioApi,
   DEFAULT_BLOOIO_BASE_URL,
+  getBlooioChat,
   getBlooioContactCapabilities,
   listBlooioMessages,
   lookupBlooioNumber,
@@ -39,20 +41,30 @@ export {
   type BlooioChannelType,
   type BlooioCredentials,
   type BlooioFetch,
+  type BlooioInteractive,
+  type BlooioInteractiveKind,
+  type BlooioInvitation,
   type BlooioListMessagesInput,
+  type BlooioMessageContent,
   type BlooioReactInput,
+  type BlooioRichLink,
   type BlooioSendMessageInput,
+  type BlooioSendOptions,
   type BlooioSendPollInput,
   type BlooioSendToRecipientInput,
 } from "./api.js";
 
 export {
   formatBlooioContextBlock,
+  isAppleMessagesForBusiness,
   parseBlooioInboundMessage,
   resolveAttachmentMediaType,
   type BlooioInboundAttachment,
   type BlooioInboundMessage,
+  type BlooioInteractiveReply,
 } from "./inbound.js";
+
+export { AMB_INTERACTIVE_TOOL_INPUT_SCHEMA } from "./ambInteractiveSchema.js";
 
 export {
   defaultBlooioAuth,

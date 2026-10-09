@@ -190,3 +190,101 @@ describe("default message.completed handler", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 });
+
+describe("default turn.started handler", () => {
+  it("shows a typing indicator on Apple Messages for Business", async () => {
+    const startTyping = vi.fn(async () => ({ ok: true, status: 200, body: null }));
+    const channel = { blooio: { chatId: "chat_amb", isAppleMessagesForBusiness: true, startTyping } } as any;
+    await defaultEvents["turn.started"]!({} as any, channel, {} as any);
+    expect(startTyping).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing on other channel types", async () => {
+    const startTyping = vi.fn();
+    const channel = { blooio: { chatId: "chat_x", isAppleMessagesForBusiness: false, startTyping } } as any;
+    await defaultEvents["turn.started"]!({} as any, channel, {} as any);
+    expect(startTyping).not.toHaveBeenCalled();
+  });
+});
+
+describe("Apple Messages for Business conversations", () => {
+  function ambFetch(chat: Record<string, unknown> = {}) {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ data: { id: "chat_amb", ...chat } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+    return { calls, fetch };
+  }
+
+  async function captureAmbHandle(fetch: typeof globalThis.fetch) {
+    let handle: any;
+    const channel = blooioChannel({
+      credentials: { apiKey: "bl_live", webhookSecret: SECRET },
+      fetch,
+      onMessage(ctx) {
+        handle = ctx.blooio;
+        return null;
+      },
+    });
+    const { from, settle, waitUntil } = mockRouteArgs();
+    await getPostHandler(channel)(
+      signedWebhook({
+        chat_id: "chat_amb",
+        channel_type: "amb",
+        sender: "urn:mbid:opaque",
+        recipient: "support",
+        text: "hi",
+      }),
+      { from, waitUntil },
+    );
+    await settle();
+    return handle;
+  }
+
+  it("exposes AMB conversation details on the handle", async () => {
+    const handle = await captureAmbHandle(ambFetch().fetch);
+    expect(handle.isAppleMessagesForBusiness).toBe(true);
+    expect(handle.channelType).toBe("amb");
+    expect(handle.chatId).toBe("chat_amb");
+  });
+
+  it("sends interactive messages and rich links to the bound chat", async () => {
+    const { calls, fetch } = ambFetch();
+    const handle = await captureAmbHandle(fetch);
+    await handle.sendInteractive({ kind: "quick_reply", summary_text: "Pick one", items: [{ id: "a", title: "A" }] });
+    await handle.sendRichLink("https://blooio.com", "Blooio");
+    expect(calls[0]!.url).toBe("https://api.blooio.com/v4/chats/chat_amb/messages");
+    expect(JSON.parse(calls[0]!.init.body as string).interactive.kind).toBe("quick_reply");
+    expect(JSON.parse(calls[1]!.init.body as string)).toEqual({
+      rich_link: { title: "Blooio", url: "https://blooio.com" },
+    });
+  });
+
+  it("reads supported interactive kinds from the chat", async () => {
+    const { calls, fetch } = ambFetch({ supported_interactive_kinds: ["quick_reply", "list_picker"] });
+    const handle = await captureAmbHandle(fetch);
+    await expect(handle.supportedInteractiveKinds()).resolves.toEqual(["quick_reply", "list_picker"]);
+    expect(calls[0]!.url).toBe("https://api.blooio.com/v4/chats/chat_amb");
+  });
+
+  it("sends invitations from the conversation's AMB alias", async () => {
+    const { calls, fetch } = ambFetch();
+    const handle = await captureAmbHandle(fetch);
+    await handle.sendInvitation({ to: "tel:+15551234567", invitation: { template_id: "tmpl_1" } });
+    expect(calls[0]!.url).toBe("https://api.blooio.com/v4/messages");
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({
+      from: "support",
+      invitation: { template_id: "tmpl_1" },
+      to: "tel:+15551234567",
+    });
+  });
+
+  it("does not look up the opaque AMB sender as a phone number", async () => {
+    const handle = await captureAmbHandle(ambFetch().fetch);
+    expect(() => handle.lookupNumber()).toThrow(/requires a number/);
+  });
+});

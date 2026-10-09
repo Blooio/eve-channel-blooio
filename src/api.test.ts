@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   blooioContinuationToken,
+  getBlooioChat,
   lookupBlooioNumber,
   reactBlooioMessage,
   sendBlooioMessage,
@@ -54,7 +55,50 @@ describe("sendBlooioMessage", () => {
     const { fetch } = jsonFetch();
     await expect(
       sendBlooioMessage({ credentials: { apiKey: "bl_live" }, fetch, chatId: "chat_x" }),
-    ).rejects.toThrow(/text or at least one attachment/);
+    ).rejects.toThrow(/requires text, attachments/);
+  });
+
+  it("sends Apple Messages for Business interactive content verbatim", async () => {
+    const { fetch, calls } = jsonFetch();
+    const interactive = {
+      kind: "quick_reply" as const,
+      summary_text: "How can we help?",
+      items: [
+        { id: "billing", title: "Billing" },
+        { id: "support", title: "Support" },
+      ],
+    };
+    await sendBlooioMessage({ credentials: { apiKey: "bl_live" }, fetch, chatId: "chat_amb", interactive });
+    expect(calls[0]!.url).toBe(`${BASE}/chats/chat_amb/messages`);
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ interactive });
+  });
+
+  it("maps rich links, markdown format, and reply_to to v4 field names", async () => {
+    const { fetch, calls } = jsonFetch();
+    await sendBlooioMessage({
+      credentials: { apiKey: "bl_live" },
+      fetch,
+      chatId: "chat_x",
+      text: "**hi**",
+      format: "markdown",
+      richLink: { url: "https://blooio.com", title: "Blooio" },
+      replyTo: "msg_9",
+    });
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({
+      text: "**hi**",
+      format: "markdown",
+      rich_link: { url: "https://blooio.com", title: "Blooio" },
+      reply_to: "msg_9",
+    });
+  });
+});
+
+describe("getBlooioChat", () => {
+  it("gets the chat endpoint", async () => {
+    const { fetch, calls } = jsonFetch();
+    await getBlooioChat({ credentials: { apiKey: "bl_live" }, fetch, chatId: "chat_amb" });
+    expect(calls[0]!.url).toBe(`${BASE}/chats/chat_amb`);
+    expect(calls[0]!.init.method).toBe("GET");
   });
 });
 
@@ -87,6 +131,22 @@ describe("sendBlooioToRecipient", () => {
     const body = JSON.parse(calls[0]!.init.body as string);
     expect(body.from).toBe("+18582849901");
     expect(body.channel_type).toBeUndefined();
+  });
+
+  it("sends an Apple Messages for Business invitation from an alias to a phone number", async () => {
+    const { fetch, calls } = jsonFetch();
+    await sendBlooioToRecipient({
+      credentials: { apiKey: "bl_live" },
+      fetch,
+      to: "tel:+15551234567",
+      from: "support",
+      invitation: { template_id: "tmpl_welcome", reference_id: "order-42" },
+    });
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({
+      invitation: { template_id: "tmpl_welcome", reference_id: "order-42" },
+      to: "tel:+15551234567",
+      from: "support",
+    });
   });
 });
 
