@@ -74,6 +74,7 @@ Blooio signs every delivery with `X-Blooio-Signature: t=<unix>,v1=<hmac_sha256>`
 ## How it works
 
 - **Inbound** — A verified `message.received` webhook (the v4 envelope `{ id, type, created_at, organization_id, data }`) is parsed and dispatched into the agent with a `<blooio_context>` block (channel type, sender, chat id, and reply guidance). Conversations are sticky to their Blooio chat via a continuation token (`blooio:<chatId>`). Delivery-status and other events (`message.delivered`, `typing.*`, `poll.*`, …) are acknowledged and ignored.
+- **Delivery guarantee** — The webhook is acknowledged only after the eve session accepts the message. If `onMessage` throws or the enqueue fails, the route returns a 5xx and Blooio retries the delivery with backoff, so a message is never acknowledged and lost. Delivery is at-least-once: a retry after a lost acknowledgment can redeliver a message, so return `null` from `onMessage` for an already-seen `message.eventId` if you need exactly-once.
 - **Inbound attachments** — Images, video, audio, and documents on an inbound message are forwarded to the model as multimodal `UserContent` file parts (one per attachment, alongside any text). Blooio re-hosts inbound media at servable URLs, so they pass straight through to your model provider — no extra download step or `fetchFile` hook required.
 - **Outbound** — When the agent produces a reply, the default `message.completed` handler sends it back through `POST /chats/{chatId}/messages`. Errors are reported to the conversation.
 

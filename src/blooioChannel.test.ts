@@ -167,6 +167,69 @@ describe("blooioChannel inbound route", () => {
   });
 });
 
+describe("inbound admission", () => {
+  const webhook = () =>
+    signedWebhook({ chat_id: "chat_abc", message_id: "msg_1", sender: "+15551112222", text: "hi" });
+
+  it("acknowledges only after the session accepts the message", async () => {
+    const channel = blooioChannel({ credentials: { apiKey: "bl_live", webhookSecret: SECRET } });
+    const order: string[] = [];
+    const send = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      order.push("accepted");
+      return { id: "session_1" };
+    });
+    const res = await getPostHandler(channel)(webhook(), { from: () => ({ send }), waitUntil: () => {} });
+    order.push("acknowledged");
+
+    expect(res.status).toBe(200);
+    expect(order).toEqual(["accepted", "acknowledged"]);
+  });
+
+  it("fails the webhook when enqueue fails so Blooio retries it", async () => {
+    const channel = blooioChannel({ credentials: { apiKey: "bl_live", webhookSecret: SECRET } });
+    const pending: Promise<unknown>[] = [];
+    const send = vi.fn(async () => {
+      throw new Error("enqueue unavailable");
+    });
+    await expect(
+      getPostHandler(channel)(webhook(), { from: () => ({ send }), waitUntil: (p: Promise<unknown>) => pending.push(p) }),
+    ).rejects.toThrow("enqueue unavailable");
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(pending).toHaveLength(0);
+  });
+
+  it("fails the webhook when onMessage throws", async () => {
+    const channel = blooioChannel({
+      credentials: { apiKey: "bl_live", webhookSecret: SECRET },
+      onMessage() {
+        throw new Error("auth lookup failed");
+      },
+    });
+    const { from, send } = mockRouteArgs();
+    await expect(getPostHandler(channel)(webhook(), { from, waitUntil: () => {} })).rejects.toThrow(
+      "auth lookup failed",
+    );
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("does not let a failed read receipt block or fail admission", async () => {
+    const fetch = vi.fn(async () => {
+      throw new Error("network down");
+    }) as unknown as typeof globalThis.fetch;
+    const channel = blooioChannel({
+      credentials: { apiKey: "bl_live", webhookSecret: SECRET },
+      fetch,
+      markReadOnReceive: true,
+    });
+    const { from, send, settle, waitUntil } = mockRouteArgs();
+    const res = await getPostHandler(channel)(webhook(), { from, waitUntil });
+    await settle();
+    expect(res.status).toBe(200);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("default message.completed handler", () => {
   it("sends the completed assistant message", async () => {
     const sendMessage = vi.fn(async () => ({ ok: true, status: 200, body: null }));

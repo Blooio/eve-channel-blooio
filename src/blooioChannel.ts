@@ -250,7 +250,13 @@ export interface BlooioChannelConfig {
   /** Mark conversations read when an inbound message is received. Defaults to `false`. */
   readonly markReadOnReceive?: boolean;
 
-  /** Inbound message hook. Defaults to sender auth and dispatch. */
+  /**
+   * Inbound message hook. Defaults to sender auth and dispatch. The webhook is
+   * acknowledged only after the session accepts the message; a throw here or a
+   * failed enqueue returns a 5xx and Blooio retries the delivery. Delivery is
+   * at-least-once: return `null` for an already-seen `message.eventId` if you
+   * need to drop redeliveries.
+   */
   onMessage?(ctx: BlooioContext, message: BlooioInboundMessage): BlooioInboundResultOrPromise;
 
   readonly events?: BlooioChannelEvents;
@@ -323,7 +329,9 @@ export function blooioChannel(config: BlooioChannelConfig = {}): BlooioChannel {
           return new Response("forbidden", { status: 403 });
         }
 
-        waitUntil(dispatch({ config, from, message, onMessage }));
+        // Acknowledge only after the session accepts the message. A thrown
+        // onMessage or enqueue failure surfaces as a 5xx, which Blooio retries.
+        await dispatch({ config, from, message, onMessage, waitUntil });
         return new Response("ok");
       }),
     ],
@@ -390,30 +398,23 @@ async function dispatch(input: {
   readonly from: ChannelFrom<BlooioChannelState>;
   readonly message: BlooioInboundMessage;
   readonly onMessage: NonNullable<BlooioChannelConfig["onMessage"]>;
+  readonly waitUntil: (task: Promise<unknown>) => void;
 }): Promise<void> {
   const { config, from, message } = input;
   const state = stateFromInbound(message);
   const handle = buildBlooioHandle({ config, state });
 
-  if (config.markReadOnReceive) {
-    await handle.markRead().catch(() => undefined);
-  }
+  // A read receipt is cosmetic and must not hold up or fail admission.
+  if (config.markReadOnReceive) input.waitUntil(handle.markRead().catch(() => undefined));
 
-  let result: BlooioInboundResult;
-  try {
-    result = await input.onMessage({ blooio: handle }, message);
-  } catch {
-    return;
-  }
+  const result = await input.onMessage({ blooio: handle }, message);
   if (!result) return;
 
-  await from(blooioContinuationToken(message.chatId))
-    .send(buildInboundMessageContent(message), {
-      auth: result.auth,
-      context: [formatBlooioContextBlock(message)],
-      state,
-    })
-    .catch(() => undefined);
+  await from(blooioContinuationToken(message.chatId)).send(buildInboundMessageContent(message), {
+    auth: result.auth,
+    context: [formatBlooioContextBlock(message)],
+    state,
+  });
 }
 
 /**
