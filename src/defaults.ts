@@ -44,30 +44,34 @@ export function defaultOnMessage(
  * works, as Apple's Experience Review expects before bot replies.
  */
 export const defaultEvents: BlooioChannelEvents = {
-  async "turn.started"(_event, channel) {
+  async "turn.started"(_event, { channel }) {
     if (!channel.blooio.isAppleMessagesForBusiness || !channel.blooio.chatId) return;
     await channel.blooio.startTyping().catch(() => undefined);
   },
 
-  async "message.completed"(event, channel) {
-    if (event.finishReason === "tool-calls" || !event.message) return;
-    await channel.blooio.sendMessage(event.message);
+  async "content.completed"({ data }, { channel }) {
+    if (data.kind !== "text" || data.phase !== "reply" || typeof data.value !== "string" || !data.value) return;
+    await channel.blooio.sendMessage(data.value);
   },
 
-  async "turn.failed"(event, channel) {
+  async "turn.settled"({ data }, { channel }) {
+    if (data.outcome !== "failed") return;
+    const message = data.error?.message;
     await channel.blooio.sendMessage(
       [
-        `I hit an error while handling your request${event.message ? `: ${event.message}` : ""}.`,
+        `I hit an error while handling your request${message ? `: ${message}` : ""}.`,
         "",
         "Please try again, rephrase, or reach out if it keeps failing.",
       ].join("\n"),
     );
   },
 
-  async "session.failed"(event, channel) {
+  async "session.ended"({ data }, { channel }) {
+    if (data.outcome !== "failed") return;
+    const message = data.error?.message;
     await channel.blooio.sendMessage(
       [
-        `This session could not recover from an error${event.message ? `: ${event.message}` : ""}.`,
+        `This session could not recover from an error${message ? `: ${message}` : ""}.`,
         "",
         "Send a new message to continue.",
       ].join("\n"),
