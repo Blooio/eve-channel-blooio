@@ -18,13 +18,15 @@ npm install eve@latest ai
 
 ### Compatibility
 
-| eve version | Support                                                                                         |
-| ----------- | ----------------------------------------------------------------------------------------------- |
-| 0.69+       | Everything, including the interactive tool ending the turn after it sends                       |
-| 0.43 – 0.68 | Everything; the interactive tool works but the model may add a short text after it sends        |
-| < 0.43      | Not supported (use `eve-channel-blooio@0.2.0`)                                                  |
+This version requires **Node.js 24+** and **eve 1.x**, and is tested against published eve **1.0.0**.
+For eve 0.x, use an older channel release; this version does not support the old event contract.
 
-Tested against eve 0.48 and 0.76 (latest).
+When migrating custom `events`, handlers now receive `(event, ctx)`: access the
+Blooio handle as `ctx.channel.blooio`. Replies use `content.completed` with
+`event.data.kind === "text"`, `event.data.phase === "reply"`, and a string
+`event.data.value`; narration and reasoning are not customer replies.
+Replace `turn.failed` and `session.failed` with `turn.settled` and `session.ended`,
+and check `event.data.outcome === "failed"` before reporting an error.
 
 ## Quick start
 
@@ -75,8 +77,8 @@ Blooio signs every delivery with `X-Blooio-Signature: t=<unix>,v1=<hmac_sha256>`
 
 - **Inbound** — A verified `message.received` webhook (the v4 envelope `{ id, type, created_at, organization_id, data }`) is parsed and dispatched into the agent with a `<blooio_context>` block (channel type, sender, chat id, and reply guidance). Conversations are sticky to their Blooio chat via a continuation token (`blooio:<chatId>`). Delivery-status and other events (`message.delivered`, `typing.*`, `poll.*`, …) are acknowledged and ignored.
 - **Delivery guarantee** — The webhook is acknowledged only after the eve session accepts the message. If `onMessage` throws or the enqueue fails, the route returns a 5xx and Blooio retries the delivery with backoff, so a message is never acknowledged and lost. Delivery is at-least-once: a retry after a lost acknowledgment can redeliver a message, so return `null` from `onMessage` for an already-seen `message.eventId` if you need exactly-once.
-- **Inbound attachments** — Images, video, audio, and documents on an inbound message are forwarded to the model as multimodal `UserContent` file parts (one per attachment, alongside any text). Blooio re-hosts inbound media at servable URLs, so they pass straight through to your model provider — no extra download step or `fetchFile` hook required.
-- **Outbound** — When the agent produces a reply, the default `message.completed` handler sends it back through `POST /chats/{chatId}/messages`. Errors are reported to the conversation.
+- **Inbound attachments** — Images, video, audio, and documents on an inbound message are submitted as eve `MessageContent` file parts (one per attachment, alongside any text). Blooio re-hosts inbound media at servable URLs; eve loads them through its public HTTPS fallback, with its normal media admission checks. No custom `fetchFile` hook is required.
+- **Outbound** — The default `content.completed` handler sends nonempty text parts marked as replies through `POST /chats/{chatId}/messages`. Narration, reasoning, and non-text parts are not sent. Failed `turn.settled` and `session.ended` events are reported to the conversation; successful or cancelled endings are ignored.
 
 ## Apple Messages for Business
 
@@ -113,7 +115,7 @@ export default blooioInteractiveTool();
 The tool's input schema is Blooio's [published JSON Schema for model-generated interactive messages](https://docs.blooio.com/amb-interactive), so the model's output is always a valid interactive object. The tool:
 
 - sends to the current conversation's chat (taken from the session's `chat_id` auth attribute, or the latest `<blooio_context>` block);
-- ends the turn after a successful send (eve 0.69+), so the customer's tap arrives as the next message;
+- ends the turn after a successful send, so the customer's tap arrives as the next message;
 - declines on non-Apple Messages for Business conversations and when the device can't render the kind (`422 amb_capability_unavailable`), telling the model to reply in plain text instead.
 
 If you replace `onMessage` with your own auth, keep a `chat_id` attribute (as `defaultBlooioAuth` does) or keep the default context block.
@@ -123,9 +125,9 @@ If you replace `onMessage` with your own auth, keep a `chat_id` attribute (as `d
 ```ts
 export default blooioChannel({
   events: {
-    async "message.completed"(event, channel) {
-      if (!event.message) return;
-      await channel.blooio.sendMessage(event.message);
+    async "content.completed"({ data }, { channel }) {
+      if (data.kind !== "text" || data.phase !== "reply" || typeof data.value !== "string" || !data.value) return;
+      await channel.blooio.sendMessage(data.value);
 
       if (channel.blooio.isAppleMessagesForBusiness) {
         const kinds = await channel.blooio.supportedInteractiveKinds();
@@ -171,19 +173,19 @@ The `BlooioHandle` exposed to hooks and event handlers wraps the Blooio v4 messa
 ```ts
 export default blooioChannel({
   events: {
-    async "message.completed"(event, channel) {
-      if (!event.message) return;
+    async "content.completed"({ data }, { channel }) {
+      if (data.kind !== "text" || data.phase !== "reply" || typeof data.value !== "string" || !data.value) return;
       // tapback the user's message, then reply
       await channel.blooio.react("msg_123", "+love");
       await channel.blooio.startTyping();
-      await channel.blooio.sendMessage(event.message);
+      await channel.blooio.sendMessage(data.value);
       await channel.blooio.markRead();
     },
   },
 });
 ```
 
-`channel.blooio` supports:
+`ctx.channel.blooio` in event handlers (or `ctx.blooio` in `onMessage`) supports:
 
 - `sendMessage(text, options?)` — text and/or public media URLs, with optional `format: "markdown"` (iMessage rich text) and `replyTo`; replies to the bound chat, or routes to the recipient for a proactive conversation
 - `sendInteractive(interactive, options?)` — Apple Messages for Business interactive message

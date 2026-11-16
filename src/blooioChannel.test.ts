@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { blooioChannel } from "./blooioChannel.js";
-import { defaultEvents } from "./defaults.js";
 import { signBlooioPayload } from "./verify.js";
 
 const SECRET = "whsec_test_secret";
@@ -14,7 +13,7 @@ function getPostHandler(channel: ReturnType<typeof blooioChannel>) {
 }
 
 /**
- * Builds the route-handler args eve 0.43+ passes as the second argument. The
+ * Builds the route-handler args eve 1.x passes as the second argument. The
  * inbound route creates sessions via `from(address).send(message, options)`,
  * so `from` returns a stub bound to the shared `send` spy.
  */
@@ -199,6 +198,33 @@ describe("inbound admission", () => {
     expect(pending).toHaveLength(0);
   });
 
+  it("lets onMessage drop a verified delivery without enqueueing", async () => {
+    const onMessage = vi.fn(() => null);
+    const channel = blooioChannel({
+      credentials: { apiKey: "bl_live", webhookSecret: SECRET }, onMessage,
+    });
+    const { from, send, waitUntil } = mockRouteArgs();
+    const res = await getPostHandler(channel)(webhook(), { from, waitUntil });
+    expect(res.status).toBe(200);
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("preserves custom auth for eve admission and approval policies", async () => {
+    const auth = {
+      principalId: "customer_1", principalType: "user", authenticator: "customer-lookup",
+      attributes: { chat_id: "chat_abc", role: "customer" },
+    };
+    const channel = blooioChannel({
+      credentials: { apiKey: "bl_live", webhookSecret: SECRET },
+      onMessage: () => ({ auth }),
+    });
+    const send = vi.fn(async (_message: unknown, _options: unknown) => ({ id: "session_1" }));
+    const res = await getPostHandler(channel)(webhook(), { from: () => ({ send }), waitUntil: () => {} });
+    expect(res.status).toBe(200);
+    expect(send).toHaveBeenCalledWith("hi", expect.objectContaining({ auth }));
+  });
+
   it("fails the webhook when onMessage throws", async () => {
     const channel = blooioChannel({
       credentials: { apiKey: "bl_live", webhookSecret: SECRET },
@@ -227,46 +253,6 @@ describe("inbound admission", () => {
     await settle();
     expect(res.status).toBe(200);
     expect(send).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("default message.completed handler", () => {
-  it("sends the completed assistant message", async () => {
-    const sendMessage = vi.fn(async () => ({ ok: true, status: 200, body: null }));
-    const channel = { blooio: { sendMessage } } as any;
-    await defaultEvents["message.completed"]!(
-      { finishReason: "stop", message: "the answer", sequence: 0, stepIndex: 0, turnId: "t" } as any,
-      channel,
-      {} as any,
-    );
-    expect(sendMessage).toHaveBeenCalledWith("the answer");
-  });
-
-  it("skips tool-call boundaries", async () => {
-    const sendMessage = vi.fn();
-    const channel = { blooio: { sendMessage } } as any;
-    await defaultEvents["message.completed"]!(
-      { finishReason: "tool-calls", message: null, sequence: 0, stepIndex: 0, turnId: "t" } as any,
-      channel,
-      {} as any,
-    );
-    expect(sendMessage).not.toHaveBeenCalled();
-  });
-});
-
-describe("default turn.started handler", () => {
-  it("shows a typing indicator on Apple Messages for Business", async () => {
-    const startTyping = vi.fn(async () => ({ ok: true, status: 200, body: null }));
-    const channel = { blooio: { chatId: "chat_amb", isAppleMessagesForBusiness: true, startTyping } } as any;
-    await defaultEvents["turn.started"]!({} as any, channel, {} as any);
-    expect(startTyping).toHaveBeenCalledTimes(1);
-  });
-
-  it("does nothing on other channel types", async () => {
-    const startTyping = vi.fn();
-    const channel = { blooio: { chatId: "chat_x", isAppleMessagesForBusiness: false, startTyping } } as any;
-    await defaultEvents["turn.started"]!({} as any, channel, {} as any);
-    expect(startTyping).not.toHaveBeenCalled();
   });
 });
 

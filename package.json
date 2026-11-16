@@ -51,7 +51,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -64,12 +64,12 @@
   },
   "peerDependencies": {
     "ai": ">=7.0.0",
-    "eve": ">=0.43.0"
+    "eve": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "ai": "^7.0.137",
-    "eve": "^0.76.0",
+    "eve": "^1.0.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0",
     "zod": "^4.6.5"

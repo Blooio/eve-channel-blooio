@@ -48,7 +48,7 @@ const PLAIN_TEXT_INSTRUCTIONS = "Reply to the customer in plain text instead.";
  *
  * The target chat comes from the session's `chat_id` auth attribute (set by
  * the default Blooio auth), falling back to the latest `<blooio_context>`
- * block. A successful send ends the turn (eve 0.69+).
+ * block. A successful send ends the turn.
  *
  * @example
  * ```ts

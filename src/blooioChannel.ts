@@ -1,4 +1,3 @@
-import type { UserContent } from "ai";
 import {
   defineChannel,
   POST,
@@ -6,6 +5,8 @@ import {
   type ChannelContinuationOps,
   type ChannelEvents,
   type ChannelFrom,
+  type MessageContent,
+  type MessagePart,
 } from "eve/channels";
 import type { SessionAuthContext } from "eve/context";
 
@@ -298,7 +299,6 @@ export function blooioChannel(config: BlooioChannelConfig = {}): BlooioChannel {
     BlooioReceiveTarget,
     BlooioInstrumentationMetadata
   >({
-    kindHint: "blooio",
     state: EMPTY_STATE,
     metadata(state): BlooioInstrumentationMetadata {
       return {
@@ -419,19 +419,19 @@ async function dispatch(input: {
 
 /**
  * Builds the delivery content for an inbound message. When the message
- * carries attachments, returns a multimodal `UserContent` array (text part
+ * carries attachments, returns a multimodal `MessageContent` array (text part
  * plus one file part per attachment) so the model can see the media. Blooio
- * re-hosts inbound media at servable URLs, so the file-part URLs pass straight
- * through to the model provider. Text-only messages return a plain string.
+ * re-hosts inbound media at servable URLs; eve loads them through its public
+ * HTTPS fallback and applies media admission checks. Text-only messages return a plain string.
  */
-function buildInboundMessageContent(message: BlooioInboundMessage): string | UserContent {
+function buildInboundMessageContent(message: BlooioInboundMessage): MessageContent {
   const files = message.attachments.filter(
     (attachment): attachment is typeof attachment & { url: string } =>
       typeof attachment.url === "string" && attachment.url.length > 0,
   );
   if (files.length === 0) return message.text;
 
-  const parts: Exclude<UserContent, string> = [];
+  const parts: MessagePart[] = [];
   if (message.text) parts.push({ type: "text", text: message.text });
   for (const attachment of files) {
     parts.push({
